@@ -1,0 +1,58 @@
+# V1 universe: 22 highly liquid US large caps spread across 8 sectors, with the
+# broad-market benchmark and one reference ETF per sector.
+#
+# Deliberately small: the point of M1 is a correct cross-sectional pipeline, not
+# breadth. Membership is static — safe for intraday windows, but it must become
+# time-aware before any multi-year study (see universe/definition.py).
+
+name: us_liquid_22
+
+benchmark: SPY
+
+symbols:
+  - AAPL
+  - MSFT
+  - NVDA
+  - AVGO
+  - JPM
+  - BAC
+  - GS
+  - XOM
+  - CVX
+  - JNJ
+  - UNH
+  - LLY
+  - AMZN
+  - TSLA
+  - HD
+  - GOOGL
+  - META
+  - NFLX
+  - CAT
+  - BA
+  - PG
+  - KO
+
+sectors:
+  AAPL: XLK
+  MSFT: XLK
+  NVDA: XLK
+  AVGO: XLK
+  JPM: XLF
+  BAC: XLF
+  GS: XLF
+  XOM: XLE
+  CVX: XLE
+  JNJ: XLV
+  UNH: XLV
+  LLY: XLV
+  AMZN: XLY
+  TSLA: XLY
+  HD: XLY
+  GOOGL: XLC
+  META: XLC
+  NFLX: XLC
+  CAT: XLI
+  BA: XLI
+  PG: XLP
+  KO: XLP

@@ -1,0 +1,21 @@
+# Data and generated artifacts never enter Git
+data/**
+!data/.gitkeep
+results/**
+!results/.gitkeep
+
+# Secrets
+.env
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store

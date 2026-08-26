@@ -1,0 +1,6 @@
+# One-symbol universe for the MA-crossover baseline. SPY is present as the
+# benchmark only — it is never traded.
+name: single_pltr
+benchmark: SPY
+symbols:
+  - PLTR

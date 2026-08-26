@@ -1,0 +1,65 @@
+# M1 baseline (modelling roadmap V0, cross-sectional): peer-relative residual
+# reversion across a 22-name universe.
+#
+# At each rebalance the strategy ranks every eligible stock by its sector-
+# residual return over the lookback, standardises the ranking across the
+# cross-section, and holds the extremes — long the most beaten-down residuals,
+# short the most stretched. An empty book is a valid answer when nothing clears
+# the z-score threshold.
+#
+# `mode` switches the hypothesis (reversion vs momentum). Both are legitimate
+# to test; picking the winner by looking at the equity curve is not. Compare
+# them on rank IC and on out-of-sample windows.
+
+run_id: xsec_reversion
+
+universe: config/universe/us_liquid_22.yaml
+
+data:
+  timeframe: 1Min
+  feed: iex
+  start: "2026-07-28"
+  end: "2026-08-26"
+  regular_hours_only: true
+
+strategy:
+  name: cross_sectional_residual
+  params:
+    # lookback and rebalance_bars are set long on a cost argument, not on a
+    # PnL search: rank IC rises with horizon (see metrics.json) while the cost
+    # of a round trip is fixed, so the edge can only clear costs if positions
+    # are held. They have NOT been validated out of sample — see PROGRESS.md.
+    lookback: 120           # bars of residual return accumulated into the score
+    beta_window: 120        # trailing window for the beta to the sector ETF
+    reference: sector       # "sector" or "market"
+    mode: reversion         # "reversion" or "momentum"
+    n_positions: 3          # per side
+    allow_short: true
+    min_abs_zscore: 1.0     # below this the cross-section has no outliers -> no trade
+    rebalance_bars: 120     # refresh the book every 2 hours, session-anchored
+    min_eligible: 8         # need breadth before a ranking means anything
+    flat_time: "15:50"
+
+liquidity:
+  min_price: 5.0
+  min_dollar_volume: 20000.0
+  lookback_bars: 60
+  max_stale_bars: 5
+
+costs:
+  half_spread_bps: 1.0
+  slippage_bps: 0.5
+  commission_bps: 0.0
+  commission_per_share: 0.0
+  min_commission: 0.0
+
+execution:
+  initial_cash: 100000.0
+  gross_leverage: 0.95
+  execution_lag_bars: 1
+  execution_price: open
+  whole_shares: true
+  min_trade_notional: 250.0 # do not pay spread to move a few dollars of exposure
+
+report:
+  symbols: [NVDA, TSLA]

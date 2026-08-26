@@ -1,0 +1,46 @@
+# Deterministic baseline (modelling roadmap V0): MA crossover on one symbol.
+# Purpose is to validate the data path, the engine and the reporting — not to
+# claim alpha. Change parameters here, never in code.
+
+run_id: ma_cross_pltr
+
+universe: config/universe/single_pltr.yaml
+
+data:
+  timeframe: 1Min
+  feed: iex                 # free tier; use "sip" only with a paid subscription
+  start: "2026-07-28"       # inclusive, UTC
+  end: "2026-08-26"         # exclusive, UTC
+  regular_hours_only: true  # 09:30–16:00 America/New_York
+
+strategy:
+  name: ma_cross
+  params:
+    fast: 20
+    slow: 60
+    allow_short: false
+    flat_time: "15:55"      # exchange-local; no overnight risk
+
+liquidity:
+  min_price: 5.0
+  min_dollar_volume: 20000.0
+  lookback_bars: 60
+  max_stale_bars: 5
+
+costs:
+  half_spread_bps: 1.0      # we cross the book on every fill
+  slippage_bps: 0.5
+  commission_bps: 0.0
+  commission_per_share: 0.0 # Alpaca US equities are commission-free
+  min_commission: 0.0
+
+execution:
+  initial_cash: 100000.0
+  gross_leverage: 0.95
+  execution_lag_bars: 1     # signal at bar t close -> fill at bar t+1 open
+  execution_price: open
+  whole_shares: true
+  min_trade_notional: 0.0
+
+report:
+  symbols: [PLTR]
