@@ -19,10 +19,14 @@ Two strategies exist, both deterministic (roadmap stage V0):
 | --- | --- |
 | `ma_cross` | single-name MA crossover; the baseline that validates the plumbing |
 | `cross_sectional_residual` | ranks the universe by sector-residual return and holds the extremes long/short |
+| `trend_ratchet` | enters on a MACD turn confirmed by a calibrated trend test, exits through a monotone volatility barrier (stop, then trail) |
 
-The cross-sectional strategy **does not survive out-of-sample testing** — see
-[`docs/progress/PROGRESS.md`](docs/progress/PROGRESS.md) for the numbers. That is
-a result, not a bug: the research loop is doing its job.
+Neither alpha strategy survives out-of-sample testing —
+[R01](docs/research/R01-conviction-and-reversion.md) and
+[R02](docs/research/R02-trend-ratchet.md) have the numbers. That is a result,
+not a bug: the research loop is doing its job. `trend_ratchet`'s risk machinery
+*does* work as specified, and it reduces the open question to one number — the
+entry signal needs a 41.3% hit rate at its 1.42 payoff ratio, and delivers 39%.
 
 Machine learning has deliberately not started; M2 (LightGBM ranking) is next.
 
@@ -58,9 +62,53 @@ Results land in `results/<run_id>/`:
 Never accept a result from one setting:
 
 ```bash
-python scripts/sweep.py --config config/backtest/xsec_reversion.yaml \
-    --grid lookback=30,60,120 --grid rebalance_bars=60,120,240
+python scripts/sweep.py --config config/backtest/xsec_reversion.yaml --split mine --grid lookback=30,60,120
 ```
+
+## Ask why the trades worked
+
+Collect the K-line window around every round trip, screen what separated wins
+from losses, and save both so the analysis can be redone without a backtest.
+**This works on any strategy with no analysis-side changes:**
+
+```bash
+python scripts/analyze_episodes.py --config config/backtest/<any-config>.yaml --split mine
+```
+
+or from Python:
+
+```python
+from qtrader.analysis import diagnose
+
+diagnosis = diagnose("config/backtest/my_new_strategy.yaml", split="mine")
+print(diagnosis.summary())        # did anything clear the multiple-testing bar?
+diagnosis.conditions              # every setup feature ranked against gross return
+diagnosis.contrast                # winners vs losers, feature by feature
+diagnosis.save()                  # parquet: per-trade features + K-line windows
+diagnosis.write_report()          # paths, screens, best/worst candlestick gallery
+```
+
+Every run is screened against the same universal market features — volatility,
+relative volume, VWAP distance, breadth, market state, time of day. A strategy
+that wants its own quantities screened too overrides one method:
+
+```python
+class MyStrategy(Strategy):
+    def setup_features(self, signals, context):
+        return {"my_signal_z": signals.stack("signal_z")}   # scale-free, causal
+```
+
+Writes `results/<run_id>/episodes/`: `episode_features.parquet` (setup +
+outcome per trade), `episode_bars.parquet` (the K-lines), `episodes.json`
+(which columns are the setup), and `episodes.html`. The first findings are in
+[`docs/research/R01`](docs/research/R01-conviction-and-reversion.md).
+
+## Evaluation windows
+
+`config/splits.yaml` names contiguous windows and what each may be used for —
+`mine` generates hypotheses, `validate` confirms one and is then spent, `burned`
+is the window that chose the current parameters and cannot test them. Pass
+`--split` to any script. See [ADR-0004](docs/adr/ADR-0004-chronological-splits.md).
 
 ## Pipeline
 
@@ -73,7 +121,8 @@ Alpaca 1-min bars
   -> qtrader.strategies target weights per symbol per bar, sum(|w|) <= 1
   -> qtrader.backtest   signal at bar t close -> fill at bar t+1 open, net of costs
                         + rank IC against forward returns
-  -> qtrader.viz        K-lines with trade markers, return curve, exposure
+  -> qtrader.analysis   one episode per round trip: K-line window + setup + outcome
+  -> qtrader.viz        K-lines with trade markers, return curve, exposure, episodes
   -> results/<run_id>/
 ```
 
@@ -83,10 +132,11 @@ Alpaca 1-min bars
    return a `StrategySignals` of target weights (and `scores`, if it ranks);
 2. register it in `strategies/registry.py`;
 3. copy a config in `config/backtest/`, point `strategy.name` at it;
-4. add tests under `tests/unit/`.
+4. optionally override `setup_features` to have your own quantities screened;
+5. add tests under `tests/unit/`.
 
-The panel, tradability filter, engine, costs, metrics and reporting are reused
-unchanged.
+The panel, tradability filter, engine, costs, metrics, reporting **and the
+win/loss diagnosis** are reused unchanged.
 
 ## Tests
 

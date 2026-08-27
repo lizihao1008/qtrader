@@ -20,10 +20,14 @@ Two rules keep simulated turnover honest:
 * the engine trades a symbol **only when its target weight changes** — it never
   re-sizes a held position as equity drifts, which with whole-share rounding
   would emit a one-share order almost every bar;
-* it **cannot open or increase** exposure in a symbol that did not print in the
-  execution bar. There is no fill without a trade. Closing such a position is
-  still allowed, since the alternative — holding it forever — is worse; those
-  exits are optimistic and are counted in ``metrics['stale_exits']``.
+* it **cannot open or increase** exposure unless two separate things hold: the
+  execution bar actually printed (there is no fill without a trade — this is a
+  property of the fill bar, not of the decision bar), and the symbol was
+  eligible when the decision was taken. The second is the strategy's own gate
+  repeated, so that a strategy bug cannot open a position the universe layer
+  ruled out. Closing such a position is still allowed, since the
+  alternative — holding it forever — is worse; those exits are optimistic and
+  are counted in ``metrics['stale_exits']``.
 """
 
 from __future__ import annotations
@@ -115,7 +119,20 @@ class BacktestEngine:
         # Positions are marked at the last known close, so a symbol that stops
         # printing keeps a value instead of silently dropping out of equity.
         close = panel.close[symbols].ffill().to_numpy(dtype=float)
-        tradable = (
+        # Whether a fill is *possible* is a property of the execution bar, not
+        # of the decision bar: an order resting during a bar in which nothing
+        # traded simply does not get filled. That is `traded`, and it is not
+        # shifted. The liquidity mask (`context.tradable`) answers a different
+        # question — is this symbol worth trading at all — and is the strategy's
+        # concern, applied at the bar it decides on. Using the liquidity mask
+        # here let fills through on bars with no print, because it tolerates up
+        # to `max_stale_bars` of silence.
+        printed = panel.traded[symbols].to_numpy(dtype=bool)
+        # Eligibility is a separate question and stays a guard of its own: the
+        # strategy already applies it, and the engine repeating it means a
+        # strategy bug cannot open a position in a symbol the universe layer
+        # ruled out.
+        eligible = (
             context.tradable[symbols]
             .shift(cfg.execution_lag_bars)
             .fillna(False)
@@ -140,7 +157,7 @@ class BacktestEngine:
                     weight=wanted[j], equity=equity_at_last_close, price=price
                 )
                 increases = abs(target) > abs(held[j]) or (target * held[j] < 0)
-                if not tradable[i, j]:
+                if not (printed[i, j] and eligible[i, j]):
                     if increases:
                         continue  # fail closed; retry on a bar where it prints
                     stale_exits += 1

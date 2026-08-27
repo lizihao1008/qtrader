@@ -94,6 +94,29 @@ def ingest_symbols(
     return results
 
 
+def drop_incomplete_bars(
+    bars: pd.DataFrame, timeframe: str, *, now: dt.datetime | None = None
+) -> pd.DataFrame:
+    """Discard any bar whose interval has not finished forming.
+
+    A bar timestamped ``t`` covers ``[t, t + interval)``, so it is only a fact
+    once ``now >= t + interval``. Fetched before then it is a *partial* bar: its
+    close, high, low and volume are whatever had happened so far. Storing one
+    puts a bar in the dataset that never existed — the mirror image of
+    look-ahead, and just as capable of inventing a signal.
+
+    This is not hypothetical. A 5-minute bar captured mid-interval was stored
+    with close 313.275 on volume 3,264; the completed bar was 313.685 on 7,018.
+    It also makes the raw layer's immutability guard fire on the next download,
+    which is how it was found.
+    """
+    interval = TIMEFRAME_INTERVAL.get(timeframe)
+    if interval is None or bars.empty:
+        return bars
+    now = now or dt.datetime.now(dt.timezone.utc)
+    return bars.loc[bars.index + interval <= pd.Timestamp(now)]
+
+
 def _store_symbol(
     symbol: str,
     raw: pd.DataFrame,
@@ -107,6 +130,7 @@ def _store_symbol(
     """Validate and persist one symbol's freshly downloaded bars."""
     key = DatasetKey(symbol=symbol, timeframe=timeframe, feed=feed)
     interval = TIMEFRAME_INTERVAL.get(timeframe)
+    raw = drop_incomplete_bars(raw, timeframe)
 
     if raw.empty:
         empty = validate_bars(raw, symbol, expected_interval=interval, strict=False)

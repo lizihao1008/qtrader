@@ -12,6 +12,7 @@ scripts/                   the only entry points
   download_data.py         Alpaca -> raw -> clean, for a whole universe
   run_backtest.py          config -> results/<run_id>/
   sweep.py                 vary parameters over the same data
+  analyze_episodes.py      collect trade windows, screen what separated wins from losses
 src/qtrader/
   config.py                RunConfig / DataConfig / StrategyConfig (YAML -> dataclasses)
   runner.py                the pipeline order: config -> context -> strategy -> engine
@@ -20,6 +21,7 @@ src/qtrader/
   features/                stock indicators, relative/residual returns, cross-sectional ranks
   strategies/              market context -> target weights
   backtest/                costs, portfolio accounting, engine, metrics, signal metrics
+  analysis/                trade episodes and conditional screening
   viz/                     plotly charts + HTML report
   experiments/             run manifests, artifact persistence, parameter sweeps
 tests/unit, tests/integration
@@ -94,21 +96,58 @@ using price, trailing median dollar volume and staleness — all causal.
 ### `features/`
 * `stock.py` — causal per-symbol indicators (SMA, EMA, MACD, log return,
   realized vol, session-resetting intraday VWAP).
+* `trend.py` — two estimators of the same quantity, the drift in random-walk
+  standard deviations. `drift_zscore` standardises a fixed-window OLS slope
+  against its sampling distribution under a **driftless random walk** rather
+  than the regression's own standard error (the textbook t-statistic assumes
+  independent residuals and exceeds 2 on ~80% of random walks).
+  `ewma_drift_zscore` does the same for an exponentially weighted drift, whose
+  closed-form `S2` makes it calibrated from the session's second bar — no
+  window, no blackout. `session_drift_zscore` measures drift since the open,
+  `sum(r)/(sigma*sqrt(n))`, the only one whose window grows with the day and so
+  the only one that resolves a slow sustained move (R03). `random_walk_slope_scale(W)` is the closed form for the
+  OLS slope's sampling scale. Both are verified by simulation in `test_trend.py`.
+* `momentum.py` — `session_macd` restarts the EMAs each session so an overnight
+  gap cannot enter the oscillator, and `macd_cross_zscore` measures how sharply
+  the histogram is moving in the same random-walk units: `dh` is a linear filter
+  of returns, so `Var(dh) = (sigma*P)^2 ||g||^2` for the filter's impulse
+  response `g`. `session_reset_norms` tabulates `||g||` per within-session
+  position, because a restarted filter is not a converged one.
 * `relative.py` — `bar_log_returns` (overnight gap zeroed), `align_reference`
   (each symbol paired with its own sector/benchmark series), `rolling_beta`
   (from rolling moments, clipped), `residual_returns`, `trailing_return`.
 * `ranks.py` — cross-sectional rank / z-score / count, all requiring an
   eligibility mask so ineligible names never enter the moments.
+* `seasonality.py` — the intraday volatility U-shape. `seasonal_volatility`
+  multiplies a rolling level estimate by a per-minute-of-session profile fitted
+  on **completed prior sessions only**. A flat sigma understates the open by
+  3–4x, which silently loosens every sigma-based threshold exactly when the
+  market is wildest.
 
 ### `strategies/`
 `Strategy.generate(MarketContext) -> StrategySignals`. Weights are validated to
 be finite with `sum(|w|) <= 1`. `indicators` is a per-symbol dict carried
-through to the charts, so the report draws exactly what the rule looked at.
+through to the charts, so the report draws exactly what the rule looked at;
+`StrategySignals.stack(column)` turns one of those columns into a wide frame.
+`Strategy.setup_features(signals, context)` is the optional hook that feeds
+post-trade screening — scale-free, causal quantities only.
 * `ma_cross.py` — single-name crossover, splits capital across the universe.
 * `cross_sectional_residual.py` — residual → z-score → top/bottom-k → hold until
   the next session-anchored rebalance → flatten before the close. Exposes
   `mode` (reversion/momentum) and `reference` (sector/market) as competing
   hypotheses rather than hard-coding one.
+* `trend_ratchet.py` — the one **path-dependent** strategy (ADR-0005). Entry is
+  a **state** asked every bar, not a crossing event: significant drift
+  (`trend_estimator` selects `session`, `ewma` or `window`), oscillator on the
+  same side, optionally still accelerating (`min_cross_zscore`);
+  exit is the monotone barrier `max(entry - s*sigma_H, extreme - r*sigma_H)`,
+  where `sigma_H = sigma_bar * sqrt(horizon_bars)` also sizes the position so
+  that `weight * stop_distance` is a fixed fraction of capital. `trend_z_reset`
+  is a hysteresis band doing double duty: it releases an open position when `z`
+  reaches it on the opposite side, and disarms a symbol against re-entry until
+  `|z|` has cooled below it. Because the stop
+  depends on the best price since entry, `_walk` is an explicit loop over bars,
+  vectorised across symbols; everything else stays vectorised.
 
 ### `backtest/`
 * `costs.py` — `CostModel.fill_price` (half spread + slippage, direction-aware)
@@ -123,14 +162,65 @@ through to the charts, so the report draws exactly what the rule looked at.
 * `signal_metrics.py` — forward returns (labels, evaluation only) and rank IC
   by horizon.
 
+### `analysis/`
+The reusable win/loss diagnosis. Nothing here knows about a specific strategy.
+
+* `diagnostics.py` — **the entry point.** `diagnose(config, split=...)` runs the
+  backtest, extracts episodes, and returns a `Diagnosis` exposing `.conditions`,
+  `.contrast`, `.survivors`, `.threshold`, `.summary()`, `.save()` and
+  `.write_report()`. Accepts a `RunConfig` or a path, an optional split and
+  parameter overrides, and can reuse an already-executed `Run`.
+* `features.py` — `market_features(context)` builds the universal, strategy-
+  agnostic screen (volatility, residual volatility, beta, trailing return,
+  relative volume, bar range, VWAP distance, sector return, time of day,
+  breadth, market state, dispersion). `setup_features(strategy, signals,
+  context)` merges it with whatever the strategy declares, the strategy winning
+  a name clash and the universal version kept under a `market_` prefix. A
+  `FeatureSet` holds per-symbol frames and shared series and can `sample` one
+  symbol at one bar.
+* `episodes.py` — `extract_episodes(run)` builds one episode per round trip: the
+  K-line window (`context_bars` before the entry through the exit), the setup
+  features read at the **decision bar** (`entry - execution_lag`, so the context
+  is what the strategy actually had), and the outcome as gross, net, cost, MFE
+  and MAE. `Episodes` records which columns are setup vs outcome and exposes
+  `.screen()`, `.contrast()`, `.profile()` and `.threshold()`; `save/load`
+  persists the tables plus those roles. `oriented_paths` normalises every window
+  to bps from entry, signed so up is profit; `excursion_summary` contrasts how
+  winners and losers reached their outcome.
+* `conditions.py` — `rank_conditions` screens features against the outcome
+  (Spearman, quantile profile, monotonicity), `outcome_contrast` compares
+  winners against losers, and `bonferroni_t_threshold` states the bar a
+  t-statistic must clear given how many features were tried.
+
+**Adding a strategy requires no change here.** It is screened against the
+universal features automatically; overriding `Strategy.setup_features` adds its
+own view. See `test_diagnostics.py::test_the_same_call_works_on_a_different_strategy_unchanged`.
+
+### `experiments/splits.py`
+Named contiguous evaluation windows loaded from `config/splits.yaml`, each with
+a purpose string. `apply_split` narrows a config and suffixes its `run_id` so
+two windows cannot overwrite each other. See ADR-0004.
+
 ### `runner.py`
 `build_context` and `execute` define what "running a backtest" means, so scripts,
 sweeps and tests cannot drift apart. `execute` accepts a prebuilt context so a
 sweep loads the parquet files once.
 
 ### `viz/`
-`price_chart` (candles + indicators + volume + MACD-or-score panel + BUY/SELL
-markers at executed prices, capped at the most recent `MAX_CANDLES`),
+`episodes.py` adds the post-trade views: `path_chart` (mean oriented path of
+winners vs losers, truncated once fewer than 20% of episodes are still open, so
+the tail is not a survivorship artifact), `episode_gallery` (best/worst trades
+as normalised candlestick panels, shorts flipped so up is profit) and
+`write_episode_report`.
+
+`price_chart` has a fixed four-row layout so **any** strategy charts readably:
+price (candles + price-level indicator lines + BUY/SELL markers at executed
+prices, capped at the most recent `MAX_CANDLES`), volume, MACD, and the
+strategy's own panel (`score` / `trend_zscore` / `signal`) when it has one. The
+MACD row is always present — a strategy's own MACD series are used if it
+publishes them, otherwise a standard MACD(12,26,9) is computed in the chart and
+labelled as a reference, so a chart never lacks the indicator a reader expects.
+Alongside it,
 `equity_chart` (cumulative return vs benchmark + drawdown) and `exposure_chart`
 (gross/net exposure + position count). Long runs are bucketed to
 `MAX_LINE_POINTS` — last value for paths, minimum for drawdown, so the worst
@@ -152,6 +242,11 @@ shared data and returns one row of metrics per combination.
 5. `sum(trades.net_pnl) == equity change` for a run that ends flat.
 6. Reference ETFs are never traded.
 7. Cross-sectional statistics are computed over eligible symbols only.
+8. Episode setup features are read at the decision bar, never the fill bar.
+9. Setup features are comparable across symbols; raw price levels never enter a
+   screen.
+10. A statistic used as a filter must have a null distribution that holds for
+    price data — see `drift_zscore` versus the regression t-statistic.
 
 ## 5. Known failure modes
 
@@ -163,6 +258,14 @@ shared data and returns one row of metrics per combination.
   replicate (this happened; see PROGRESS.md).
 * **Whole-share sizing** — a weight of 0.17 rounds very differently in a $600
   stock than in a $30 one.
+* **Spurious regression** — prices are I(1), so any statistic whose standard
+  error assumes independent residuals will call trends everywhere. This bit
+  once, on the first draft of the trend filter, and the fix was a different
+  scale rather than a different threshold.
+* **Conditioning on outcomes** — holding period is partly an outcome (a position
+  stays open because it keeps being re-selected), so it is not a setup feature
+  and so is never exposed as a setup feature. The same trap catches anything
+  measured after the entry — `Strategy.setup_features` must not return one.
 * **Turnover** — at 1-minute resolution the default rebalance interval is the
   single biggest driver of net PnL. Always read `daily_turnover` next to
   `total_costs`.

@@ -63,3 +63,20 @@ def test_empty_frame_is_an_error():
     empty = make_bars([]).reindex(minute_index(0))
     with pytest.raises(DataValidationError, match="empty"):
         validate_bars(empty, "TEST")
+
+
+def test_a_bar_whose_interval_has_not_closed_is_not_stored():
+    """A partial bar is not a fact about the market; storing one invents data."""
+    import datetime as dt
+
+    from qtrader.data.ingest import drop_incomplete_bars
+
+    bars = make_bars([10.0, 11.0, 12.0])  # 09:30, 09:31, 09:32 New York
+    # 09:32:30 — the 09:32 bar is still forming, the earlier two are complete.
+    now = bars.index[2] + pd.Timedelta(seconds=30)
+
+    kept = drop_incomplete_bars(bars, "1Min", now=now)
+    assert list(kept.index) == list(bars.index[:2])
+
+    settled = drop_incomplete_bars(bars, "1Min", now=bars.index[2] + pd.Timedelta(minutes=1))
+    assert len(settled) == 3

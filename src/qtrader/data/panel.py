@@ -79,6 +79,19 @@ class BarPanel:
 
         return cls(fields, traded)
 
+    def replace_field(self, name: str, frame: pd.DataFrame) -> "BarPanel":
+        """A copy with one field replaced, for audits that rewrite history.
+
+        Used by the look-ahead audit, which needs to answer "what would this run
+        have done if later bars had been different" without reaching into the
+        panel's internals.
+        """
+        if name not in self._fields:
+            raise KeyError(f"panel has no field {name!r}; available: {sorted(self._fields)}")
+        fields = dict(self._fields)
+        fields[name] = frame.reindex(index=self.index, columns=list(self.symbols))
+        return BarPanel(fields, self._traded)
+
     def subset(self, symbols: list[str]) -> "BarPanel":
         """A panel restricted to ``symbols`` (same index)."""
         keep = [s for s in symbols if s in self.symbols]

@@ -1,0 +1,99 @@
+# `trend_ratchet` on 5-minute bars.
+#
+# TIMEFRAME AUDIT — every parameter measured in *bars* has been rescaled so it
+# spans the same wall-clock time as the 1-minute configuration. Parameters that
+# are per-fill, per-order or dimensionless are deliberately unchanged.
+#
+#   parameter              1-min   5-min   why
+#   ---------------------  ------  ------  ------------------------------------
+#   trend_span               60      12    same 60 minutes of memory
+#   trend_window             60      12    same 60-minute regression window
+#   vol_window              120      24    same 120-minute volatility sample
+#   horizon_bars             60      12    same 1-hour intended holding horizon
+#   liquidity.lookback       60      12    same 60-minute liquidity sample
+#   liquidity.min_$vol    20,000 100,000   a 5-min bar aggregates 5 minutes of
+#                                          volume, so the per-bar gate is x5
+#   liquidity.max_stale       5       2    ~5-10 minutes without a print
+#   macd 12/26/9          12/26/9 12/26/9  conventional periods are applied per
+#                                          bar on any timeframe; at 5-min they
+#                                          span 60/130/45 minutes, which is the
+#                                          longer horizon this move is testing
+#   stop/trail_sigmas       1.0/1.5 1.0/1.5 dimensionless. sigma_H = sigma_bar *
+#                                          sqrt(horizon_bars) is timeframe-
+#                                          invariant once horizon_bars is
+#                                          rescaled: sigma_5min ~ sigma_1min*sqrt(5)
+#                                          and sqrt(12)*sqrt(5) = sqrt(60).
+#   costs (bps, per fill)   same    same   a fill costs what a fill costs
+#   min_trade_notional      same    same   per order
+#   execution_lag_bars        1       1    now a 5-minute delay rather than 1 —
+#                                          strictly more conservative
+#   no_entry_after/flat_time same   same   wall-clock times
+#
+# The point of the move: cost per round trip is unchanged while the number of
+# round trips falls, so the same per-trade edge has five times as much room to
+# clear the 3 bps floor.
+
+run_id: trend_ratchet_5min
+
+universe: config/universe/us_liquid_22.yaml
+
+data:
+  timeframe: 5Min
+  feed: iex
+  start: "2024-01-02"
+  end: "2026-08-27"
+  regular_hours_only: true
+
+strategy:
+  name: trend_ratchet
+  params:
+    macd_fast: 12
+    macd_slow: 26
+    macd_signal: 9
+
+    trend_estimator: session
+    trend_span: 12
+    trend_window: 12
+    trend_z_min: 2.5
+    trend_z_reset: 1.5
+    session_confirm_z: null
+    min_cross_zscore: 0.0
+
+    vol_window: 24
+    seasonal_volatility_profile: true
+    horizon_bars: 12
+    stop_sigmas: 1.0
+    trail_sigmas: 1.5
+
+    risk_per_trade: 0.001
+    max_weight: 0.15
+    max_positions: 6
+    allow_short: true
+
+    exit_on_opposite_cross: false
+    no_entry_after: "15:00"
+    flat_time: "15:50"
+
+liquidity:
+  min_price: 5.0
+  min_dollar_volume: 100000.0
+  lookback_bars: 12
+  max_stale_bars: 2
+
+costs:
+  half_spread_bps: 1.0
+  slippage_bps: 0.5
+  commission_bps: 0.0
+  commission_per_share: 0.0
+  min_commission: 0.0
+
+execution:
+  initial_cash: 100000.0
+  gross_leverage: 0.95
+  execution_lag_bars: 1
+  execution_price: open
+  whole_shares: true
+  min_trade_notional: 250.0
+
+report:
+  symbols: [NVDA, TSLA]

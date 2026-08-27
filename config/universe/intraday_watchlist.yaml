@@ -1,0 +1,10 @@
+# Four names for a single-session intraday test. SPY is the benchmark only —
+# it is data, never a position. No sector map: `trend_ratchet` is a per-symbol
+# rule and does not use peers.
+name: intraday_watchlist
+benchmark: SPY
+symbols:
+  - USAR
+  - ZM
+  - PLTR
+  - BHVN

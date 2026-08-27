@@ -181,3 +181,25 @@ def test_invalid_parameters_are_rejected():
         CrossSectionalResidualStrategy(reference="vibes")
     with pytest.raises(ValueError, match="rebalance_bars"):
         CrossSectionalResidualStrategy(rebalance_bars=0)
+
+
+def test_the_long_leg_can_be_switched_off():
+    """A one-sided book pays one leg of cost, so it must be expressible."""
+    context, _ = _dispersed_context()
+    common = dict(lookback=10, beta_window=30, n_positions=2, min_abs_zscore=0.0,
+                  rebalance_bars=5, min_eligible=5, flat_time=None)
+
+    short_only = CrossSectionalResidualStrategy(allow_long=False, **common).generate(context)
+    both = CrossSectionalResidualStrategy(**common).generate(context)
+
+    assert (short_only.target_weights <= 0).all(axis=None)
+    assert (short_only.target_weights < 0).any(axis=None)
+    # With one side enabled it gets the whole budget, not half.
+    active = short_only.target_weights.loc[short_only.target_weights.abs().sum(axis=1) > 0]
+    assert active.abs().sum(axis=1).max() == pytest.approx(1.0)
+    assert (both.target_weights > 0).any(axis=None)
+
+
+def test_disabling_both_sides_is_rejected():
+    with pytest.raises(ValueError, match="allow_long"):
+        CrossSectionalResidualStrategy(allow_long=False, allow_short=False)

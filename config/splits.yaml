@@ -1,0 +1,60 @@
+# Chronological evaluation splits, fixed before any conditional analysis was run.
+#
+# Never shuffle time series. Each split is a contiguous window; later work is
+# mined on `mine`, confirmed on `validate`, and only then — if ever — checked
+# once on a window that has not been touched.
+#
+# `burned` is not a test set. The strategy's lookback and rebalance parameters
+# were chosen by looking at results on that window (see PROGRESS.md), so any
+# number it produces for those parameters is in-sample by construction. It is
+# recorded here so nobody mistakes it for out-of-sample evidence later.
+
+splits:
+  # --- 5-minute research splits, fixed 2026-08-26 before any 5-minute result
+  # was inspected. All earlier work in this project used 1-minute bars over
+  # 2026-02 to 2026-08, so `m5_mine` and `m5_validate` are entirely new ground.
+  # `m5_test` overlaps that calendar period at a different resolution: no
+  # strategy decision has been taken on 5-minute data from it, but it is not
+  # pristine and is labelled accordingly.
+  m5_mine:
+    start: "2024-01-02"
+    end: "2025-04-01"
+    purpose: >
+      5-minute hypothesis generation. Fifteen months never previously examined
+      at any resolution. Everything found here is a candidate, not a fact.
+
+  m5_validate:
+    start: "2025-04-01"
+    end: "2026-01-01"
+    purpose: >
+      5-minute confirmation. Nine months. A hypothesis from m5_mine is checked
+      here; repeated tuning against it converts it into a second training set.
+
+  m5_test:
+    start: "2026-01-01"
+    end: "2026-08-27"
+    purpose: >
+      Final holdout, touched once at the end. Partially contaminated: this
+      calendar period was examined at 1-minute resolution during earlier work,
+      though never at 5 minutes and never for these decisions.
+
+  mine:
+    start: "2026-02-02"
+    end: "2026-06-01"
+    purpose: >
+      Where hypotheses are generated. Everything here is in-sample by
+      definition; a difference found on this window is a candidate, not a fact.
+
+  validate:
+    start: "2026-06-01"
+    end: "2026-07-28"
+    purpose: >
+      Confirmation only. A condition discovered on `mine` is checked here once.
+      Tuning against this window converts it into a second training set.
+
+  burned:
+    start: "2026-07-28"
+    end: "2026-08-26"
+    purpose: >
+      Contaminated. Strategy parameters were selected on this window, so it can
+      no longer measure those parameters honestly. Do not report it as a test.

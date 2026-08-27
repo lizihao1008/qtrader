@@ -86,5 +86,11 @@ def save_run(
         f"costs: {config.costs.impact_bps:g} bps impact, "
         f"{config.costs.commission_per_share:g}/share"
     )
-    write_report(result, out_dir / "report.html", subtitle=subtitle, symbols=config.report_symbols)
+    write_report(
+        result,
+        out_dir / "report.html",
+        subtitle=subtitle,
+        symbols=config.report_symbols,
+        max_candles=config.report_max_candles,
+    )
     return out_dir

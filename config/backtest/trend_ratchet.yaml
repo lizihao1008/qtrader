@@ -1,0 +1,103 @@
+# Trend entry on a MACD turn, exit through a ratcheting volatility barrier.
+#
+# The three decisions are separate and each has a definition:
+#
+#   trend   |z| >= trend_z_min, where z is the trailing OLS drift standardised
+#           against its sampling distribution under a DRIFTLESS RANDOM WALK.
+#           z ~ N(0,1) under that null, so 2.0 is the usual 5% reading. (The
+#           regression's own t-statistic is not used: on a random walk it
+#           exceeds 2 about 80% of the time and would filter nothing.)
+#   timing  a sign change of the MACD histogram — the golden/death cross.
+#   risk    one sigma unit = sigma_bar * sqrt(horizon_bars). The stop starts
+#           stop_sigmas away and trails trail_sigmas behind the best close;
+#           the same sigma sizes the position, so weight * stop distance is a
+#           constant fraction of capital.
+#
+# Barriers are evaluated on CLOSES and filled at the next open, like every other
+# signal. A gap through the stop therefore loses more than one risk unit — as it
+# would in reality.
+
+run_id: trend_ratchet
+
+universe: config/universe/us_liquid_22.yaml
+
+data:
+  timeframe: 1Min
+  feed: iex
+  start: "2026-02-02"       # full available range; use --split to narrow
+  end: "2026-08-26"
+  regular_hours_only: true
+
+strategy:
+  name: trend_ratchet
+  params:
+    # --- momentum trigger (standard MACD periods, not tuned)
+    macd_fast: 12
+    macd_slow: 26
+    macd_signal: 9
+
+    # --- trend test
+    #   session : drift since the open; the window grows with the day, so it is
+    #             the only one that resolves a slow, sustained move.
+    #   ewma    : exponential, fixed memory, defined from the session's 2nd bar.
+    #   window  : fixed OLS window, blind until it is full (no entry in hour 1).
+    # All three are standardised against a driftless random walk, so the same
+    # threshold means the same thing whichever is chosen.
+    trend_estimator: session
+    trend_span: 60          # effective memory when trend_estimator is "ewma"
+    trend_window: 60        # bars used when trend_estimator is "window"
+    # 2.5 was pre-committed as the middle of the range tested (2.0/2.5/3.0)
+    # BEFORE looking at the validation window, precisely so it could not become
+    # the in-sample optimum. On `mine` the per-trade edge rose with this
+    # threshold; on `validate` it did not. See docs/research/R02.
+    trend_z_min: 2.5        # |z| under the random-walk null; 2.0 would be the 5% point
+    trend_z_reset: 1.5      # after an exit, |z| must cool below this before re-entry
+    # How hard the MACD crosses, in random-walk standard deviations. 0 disables
+    # the gate. Directionally helpful in-sample but it did not improve the
+    # per-trade t-statistic, so no level is evidenced — see docs/research/R02 §7.
+    min_cross_zscore: 0.0
+
+    # --- risk geometry
+    vol_window: 120         # bars used for the per-bar volatility estimate
+    horizon_bars: 60        # sigma_H = sigma_bar * sqrt(60): the intended hold
+    stop_sigmas: 1.0        # initial stop, in sigma_H
+    trail_sigmas: 1.5       # trail behind the best close, in sigma_H (>= stop)
+
+    # --- sizing and book limits
+    risk_per_trade: 0.001   # fraction of capital lost if the initial stop is hit
+    max_weight: 0.15
+    max_positions: 6        # max_positions * max_weight <= 1
+    allow_short: true
+
+    # --- session discipline
+    # Off by default with a state entry: a sustained trend produces many
+    # histogram flips, and exiting on each one caps holds at a few bars and
+    # defeats the ratchet. The position is released by the barrier, or when the
+    # drift statistic itself changes sides (|z| past trend_z_reset the other way).
+    exit_on_opposite_cross: false
+    no_entry_after: "15:00" # leave a new position at least its horizon
+    flat_time: "15:50"
+
+liquidity:
+  min_price: 5.0
+  min_dollar_volume: 20000.0
+  lookback_bars: 60
+  max_stale_bars: 5
+
+costs:
+  half_spread_bps: 1.0
+  slippage_bps: 0.5
+  commission_bps: 0.0
+  commission_per_share: 0.0
+  min_commission: 0.0
+
+execution:
+  initial_cash: 100000.0
+  gross_leverage: 0.95
+  execution_lag_bars: 1
+  execution_price: open
+  whole_shares: true
+  min_trade_notional: 250.0
+
+report:
+  symbols: [NVDA, TSLA]

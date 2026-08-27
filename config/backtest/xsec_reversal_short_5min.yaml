@@ -1,0 +1,74 @@
+# Short-only cross-sectional residual reversal, 5-minute bars, 100-name universe.
+#
+# Two changes from xsec_reversal_5min, each with a measured reason and neither
+# fitted to a backtest:
+#
+# 1. SHORT ONLY. Measured leg by leg on m5_mine with non-overlapping windows,
+#    the reversal edge is almost entirely on the short side: shorting the most
+#    stretched decile earns +3.77 bps over 12 bars (t=+2.91) while buying the
+#    most beaten-down decile earns +0.85 bps (t=+0.86). Dropping the long leg
+#    removes a leg that pays cost and returns nothing, halving the friction.
+#
+# 2. BREADTH. 100 names instead of 22. The top decile of a 100-name
+#    cross-section is genuinely more extreme than the top decile of 22, and
+#    widening the universe fits no parameter.
+#
+# The margin is thin: ~3.8 bps of edge against ~3.2 bps of one-leg cost at the
+# config's assumptions, and the Roll-implied effective spread on this universe
+# is *wider* than those assumptions. This is a candidate to falsify, not a
+# strategy to believe.
+#
+# It is also NOT market neutral. A short-only book carries negative beta; the
+# +3.77 bps was earned over a window in which the market rose, so the alpha
+# exceeded the beta drag there, but a strong rally would hurt it.
+
+run_id: xsec_reversal_short_5min
+
+universe: config/universe/us_liquid_100.yaml
+
+data:
+  timeframe: 5Min
+  feed: iex
+  start: "2024-01-02"
+  end: "2026-08-27"
+  regular_hours_only: true
+
+strategy:
+  name: cross_sectional_residual
+  params:
+    lookback: 12
+    beta_window: 24
+    reference: sector
+    mode: reversion
+    n_positions: 10         # ~top decile of 100 names
+    allow_long: false
+    allow_short: true
+    min_abs_zscore: 1.0
+    max_abs_zscore: null
+    rebalance_bars: 12
+    min_eligible: 30
+    flat_time: "15:50"
+
+liquidity:
+  min_price: 5.0
+  min_dollar_volume: 100000.0
+  lookback_bars: 12
+  max_stale_bars: 2
+
+costs:
+  half_spread_bps: 1.0
+  slippage_bps: 0.5
+  commission_bps: 0.0
+  commission_per_share: 0.0
+  min_commission: 0.0
+
+execution:
+  initial_cash: 100000.0
+  gross_leverage: 0.95
+  execution_lag_bars: 1
+  execution_price: open
+  whole_shares: true
+  min_trade_notional: 250.0
+
+report:
+  symbols: [NVDA, TSLA]

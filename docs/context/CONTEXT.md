@@ -112,6 +112,29 @@ Regression tests: `test_engine.py::test_future_bars_cannot_change_past_fills`,
   forward return**, not by the equity curve. Reported t-statistics overstate
   significance because forward windows overlap.
 
+## 7b. Trend definition in use
+
+"A trend" means the trailing drift divided by its sampling scale **under a
+driftless random walk** (`qtrader.features.trend`), from a fixed-window OLS fit
+(`drift_zscore`), an exponentially weighted one (`ewma_drift_zscore`), or the
+drift since the session open (`session_drift_zscore`, the default — the only one
+whose window grows with the day and therefore the only one that resolves a slow
+sustained move). The regression's own t-statistic is never used — on I(1) data it
+exceeds 2 about 80% of the time.
+
+The same principle standardises anything built from a linear filter of returns:
+`qtrader.features.momentum.macd_cross_zscore` measures how sharply a MACD
+crossing is happening in the same units, via the filter's impulse-response norm.
+
+Volatility itself is **time-of-day aware** (`qtrader.features.seasonality`): the
+per-minute standard deviation runs ~4x the session mean at the open and ~0.75x
+by midday, so a flat estimate loosens every sigma-based threshold precisely at
+the open. The profile is fitted on completed prior sessions only.
+
+The same per-bar sigma also defines the risk unit
+`sigma_H = sigma_bar * sqrt(horizon)`, so trend strength, crossing sharpness and
+stop distance are all measured in one currency.
+
 ## 8. Execution and cost assumptions
 
 * The engine trades a symbol **only when its target weight changes**; it never
@@ -128,8 +151,49 @@ Regression tests: `test_engine.py::test_future_bars_cannot_change_past_fills`,
   flat-ending run equals the realised change in equity.
 * Short selling is simulated without borrow fees or locate constraints — short
   results are optimistic until that is modelled.
+* **Stops and trailing exits are strategy logic, not engine features**
+  (ADR-0005). A barrier is evaluated on the bar's close and filled at the next
+  open like any other signal, so a gap through a stop loses more than one risk
+  unit. No backtest here fills at the barrier price inside a bar.
 
-## 9. Reproducibility
+## 9. Evaluation windows
+
+Named, contiguous windows in `config/splits.yaml`, fixed before the analysis
+that uses them (ADR-0004). Each carries a purpose string that the tooling
+prints:
+
+* `mine` (2026-02-02 → 2026-06-01) — hypothesis generation, in-sample by
+  definition;
+* `validate` (2026-06-01 → 2026-07-28) — one confirmation, then spent. It has
+  been spent for `cross_sectional_residual` (see docs/research/R01);
+* `burned` (2026-07-28 → 2026-08-26) — the window the current `lookback` and
+  `rebalance_bars` were chosen on. It cannot test those parameters.
+
+Random splits of time-series rows are forbidden.
+
+## 10. Post-trade analysis
+
+`qtrader.analysis.diagnose(config, split=...)` turns a config into **episodes**:
+one per round trip, holding the K-line window from 60 bars before the entry to
+the exit, the setup features measured at the *decision* bar, and the outcome
+split into gross and net.
+
+It is **strategy-agnostic by construction**. Every run is screened against the
+same universal market features (volatility, residual volatility, beta, trailing
+return, relative volume, bar range, VWAP distance, sector return, time of day,
+breadth, market state, cross-sectional dispersion). A strategy may add its own
+by overriding `Strategy.setup_features`, which must return quantities that are
+**comparable across symbols** (z-scores, ratios, counts, basis points — never
+raw price levels) and **causal**. Nothing in the analysis layer changes when a
+strategy is added. Costs are near-constant per round trip, so "did the signal work" is a
+question about gross return and "did the strategy make money" is a question
+about net; the two are reported separately everywhere.
+
+Screening many features against one outcome manufactures significance, so
+`bonferroni_t_threshold` is reported alongside every screen and a candidate is
+confirmed on a different window before it changes anything.
+
+## 11. Reproducibility
 
 Every run is fully specified by one YAML config (`config/backtest/*.yaml`) and
 writes `results/<run_id>/manifest.json` with config, universe, git commit, data
@@ -139,7 +203,7 @@ Parameter sensitivity is checked with `qtrader.experiments.sweep`, and any
 result worth believing must be confirmed on a window the parameters were not
 chosen on.
 
-## 10. Deferred by design
+## 12. Deferred by design
 
 Dynamic/statistical peer groups, the regime layer, supervised labels, ML models,
 the risk module and execution/broker integration are **not implemented yet**.

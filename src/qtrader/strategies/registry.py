@@ -5,10 +5,12 @@ from __future__ import annotations
 from .base import Strategy
 from .cross_sectional import CrossSectionalResidualStrategy
 from .ma_cross import MACrossStrategy
+from .trend_ratchet import TrendRatchetStrategy
 
 STRATEGIES: dict[str, type[Strategy]] = {
     MACrossStrategy.name: MACrossStrategy,
     CrossSectionalResidualStrategy.name: CrossSectionalResidualStrategy,
+    TrendRatchetStrategy.name: TrendRatchetStrategy,
 }
 
 

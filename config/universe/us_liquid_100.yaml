@@ -1,0 +1,225 @@
+# ~100 liquid US large caps across 11 sector ETFs.
+#
+# Breadth is the one lever a cross-sectional strategy has that is not a
+# parameter: with 22 names the "top 3" sit around the 87th percentile; with 100
+# they sit near the 97th, and the extremes of a wider cross-section are
+# genuinely more extreme. Widening the universe fits nothing.
+#
+# Static membership, as with the 22-name list — safe over these windows, wrong
+# for a multi-year study (see universe/definition.py).
+name: us_liquid_100
+benchmark: SPY
+symbols:
+- AAPL
+- ABBV
+- ABT
+- ACN
+- ADBE
+- ADI
+- AEP
+- AMAT
+- AMD
+- AMGN
+- AMT
+- AMZN
+- APD
+- AVGO
+- AXP
+- BA
+- BAC
+- BKNG
+- BLK
+- BMY
+- C
+- CAT
+- CB
+- CCI
+- CL
+- CMCSA
+- COP
+- COST
+- CRM
+- CSCO
+- CVS
+- CVX
+- D
+- DE
+- DHR
+- DIS
+- DUK
+- EOG
+- EQIX
+- F
+- FCX
+- FDX
+- GE
+- GM
+- GOOGL
+- GS
+- HD
+- HON
+- IBM
+- INTC
+- INTU
+- JNJ
+- JPM
+- KO
+- LIN
+- LLY
+- LMT
+- LOW
+- LRCX
+- MCD
+- MDLZ
+- META
+- MMM
+- MO
+- MPC
+- MRK
+- MS
+- MSFT
+- MU
+- NEE
+- NEM
+- NFLX
+- NKE
+- NOW
+- NVDA
+- ORCL
+- PEP
+- PFE
+- PG
+- PGR
+- PLD
+- PM
+- PSX
+- QCOM
+- RTX
+- SBUX
+- SCHW
+- SHW
+- SLB
+- SO
+- SPG
+- SPGI
+- T
+- TGT
+- TJX
+- TMO
+- TMUS
+- TSLA
+- TXN
+- UNH
+- UNP
+- UPS
+- VZ
+- WFC
+- WMT
+- XOM
+sectors:
+  AAPL: XLK
+  ABBV: XLV
+  ABT: XLV
+  ACN: XLK
+  ADBE: XLK
+  ADI: XLK
+  AEP: XLU
+  AMAT: XLK
+  AMD: XLK
+  AMGN: XLV
+  AMT: XLRE
+  AMZN: XLY
+  APD: XLB
+  AVGO: XLK
+  AXP: XLF
+  BA: XLI
+  BAC: XLF
+  BKNG: XLY
+  BLK: XLF
+  BMY: XLV
+  C: XLF
+  CAT: XLI
+  CB: XLF
+  CCI: XLRE
+  CL: XLP
+  CMCSA: XLC
+  COP: XLE
+  COST: XLP
+  CRM: XLK
+  CSCO: XLK
+  CVS: XLV
+  CVX: XLE
+  D: XLU
+  DE: XLI
+  DHR: XLV
+  DIS: XLC
+  DUK: XLU
+  EOG: XLE
+  EQIX: XLRE
+  F: XLY
+  FCX: XLB
+  FDX: XLI
+  GE: XLI
+  GM: XLY
+  GOOGL: XLC
+  GS: XLF
+  HD: XLY
+  HON: XLI
+  IBM: XLK
+  INTC: XLK
+  INTU: XLK
+  JNJ: XLV
+  JPM: XLF
+  KO: XLP
+  LIN: XLB
+  LLY: XLV
+  LMT: XLI
+  LOW: XLY
+  LRCX: XLK
+  MCD: XLY
+  MDLZ: XLP
+  META: XLC
+  MMM: XLI
+  MO: XLP
+  MPC: XLE
+  MRK: XLV
+  MS: XLF
+  MSFT: XLK
+  MU: XLK
+  NEE: XLU
+  NEM: XLB
+  NFLX: XLC
+  NKE: XLY
+  NOW: XLK
+  NVDA: XLK
+  ORCL: XLK
+  PEP: XLP
+  PFE: XLV
+  PG: XLP
+  PGR: XLF
+  PLD: XLRE
+  PM: XLP
+  PSX: XLE
+  QCOM: XLK
+  RTX: XLI
+  SBUX: XLY
+  SCHW: XLF
+  SHW: XLB
+  SLB: XLE
+  SO: XLU
+  SPG: XLRE
+  SPGI: XLF
+  T: XLC
+  TGT: XLP
+  TJX: XLY
+  TMO: XLV
+  TMUS: XLC
+  TSLA: XLY
+  TXN: XLK
+  UNH: XLV
+  UNP: XLI
+  UPS: XLI
+  VZ: XLC
+  WFC: XLF
+  WMT: XLP
+  XOM: XLE

@@ -1,0 +1,94 @@
+# Single-session run of `trend_ratchet` on three names.
+#
+# The strategy is intraday by construction: returns are computed within the
+# session (the overnight gap is excluded), the trend window must fit inside one
+# session, and everything is flat by 15:50. Running it on one day therefore
+# changes nothing about the rule — it just narrows the window.
+#
+# The data range deliberately starts a week early. The volatility estimate and
+# the liquidity filter are allowed to span sessions — they read within-session
+# returns, so no overnight gap enters them — and loading only one day would have
+# left both blind until 10:29 for no good reason. `report.max_candles` then
+# charts today alone.
+#
+# The trend test is different and stays blind until 10:29: its regression window
+# must fit inside one session, or a 60-bar window straddling the overnight gap
+# would read the gap as drift. So no entry is possible in the first
+# `trend_window` bars of a session. That is the rule being honest about how much
+# of *today* it has seen.
+
+run_id: trend_ratchet_intraday
+
+universe: config/universe/intraday_watchlist.yaml
+
+data:
+  timeframe: 1Min
+  feed: iex
+  start: "2026-07-01"       # warm-up: volatility level, liquidity, and enough
+                            # completed sessions to fit the intraday volatility
+                            # profile (it stays flat until 10 have accumulated)
+  end: "2026-08-27"
+  regular_hours_only: true
+
+strategy:
+  name: trend_ratchet
+  params:
+    macd_fast: 12
+    macd_slow: 26
+    macd_signal: 9
+    # "session" measures the drift since the open, so its window grows with the
+    # day. It is the only estimator that resolves a slow, sustained move: a
+    # stock grinding 18% higher over five hours drifts under 2 sigma in any
+    # single hour, so a fixed span reads noise all day.
+    trend_estimator: session
+    trend_span: 60
+    trend_window: 60          # unused while trend_estimator is "session"
+    trend_z_min: 2.5          # the day's drift must be this significant to hold
+    # Optionally require the histogram to still be opening in the trade's favour
+    # by this many standard deviations. Off: no evidence for a level.
+    min_cross_zscore: 0.0
+    vol_window: 120
+    horizon_bars: 60
+    stop_sigmas: 1.0
+    trail_sigmas: 1.5
+    risk_per_trade: 0.001
+    max_weight: 0.24       # four names, so a larger share each than the 22-name book
+    max_positions: 4
+    allow_short: true
+    # Off by default with a state entry: a sustained trend produces many
+    # histogram flips, and exiting on each one caps holds at a few bars and
+    # defeats the ratchet. The position is released by the barrier, or when the
+    # drift statistic itself changes sides (|z| past trend_z_reset the other way).
+    exit_on_opposite_cross: false
+    no_entry_after: "15:00"
+    flat_time: "15:50"
+
+liquidity:
+  min_price: 5.0
+  # $5k rather than the $20k used for the large-cap universe. IEX prints only a
+  # small share of the consolidated tape, and that share is much smaller for a
+  # name like USAR (median 60-bar IEX dollar volume today: ~$12k) than for a
+  # mega-cap. A gate calibrated on mega-caps would exclude USAR entirely and the
+  # run would silently become a two-name test.
+  min_dollar_volume: 5000.0
+  lookback_bars: 60
+  max_stale_bars: 5
+
+costs:
+  half_spread_bps: 1.0
+  slippage_bps: 0.5
+  commission_bps: 0.0
+  commission_per_share: 0.0
+  min_commission: 0.0
+
+execution:
+  initial_cash: 100000.0
+  gross_leverage: 0.95
+  execution_lag_bars: 1
+  execution_price: open
+  whole_shares: true
+  min_trade_notional: 250.0
+
+report:
+  symbols: [USAR, ZM, PLTR, BHVN]
+  max_candles: 230          # today's session (~219 traded minutes so far)

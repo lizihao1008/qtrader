@@ -16,7 +16,10 @@ rest, so what is left is closer to stock-specific information.
 
 Why a threshold. ``min_abs_zscore`` gives the strategy an explicit **no-trade**
 state (CLAUDE.md §11.5): on a quiet cross-section with no dispersion the right
-answer is an empty book, not the least-bad name available.
+answer is an empty book, not the least-bad name available. ``max_abs_zscore``
+adds the opposite bound: a residual move far enough out of line is more likely
+to be information than noise, and betting on it reverting is betting against
+news. It is off by default — see docs/research for whether it survived testing.
 
 Why a rebalance interval. A 1-minute cross-section changes every bar. Acting on
 every change would pay spread on every bar and turn a small edge into a
@@ -63,9 +66,12 @@ class CrossSectionalResidualStrategy(Strategy):
         reference: str = "sector",
         mode: str = "reversion",
         n_positions: int = 3,
+        allow_long: bool = True,
         allow_short: bool = True,
         min_abs_zscore: float = 1.0,
+        max_abs_zscore: float | None = None,
         rebalance_bars: int = 15,
+        max_hold_intervals: int | None = None,
         min_eligible: int = 8,
         flat_time: str | None = "15:50",
     ):
@@ -75,17 +81,30 @@ class CrossSectionalResidualStrategy(Strategy):
             raise ValueError(f"reference must be one of {REFERENCES}, got {reference!r}")
         if n_positions < 1:
             raise ValueError("n_positions must be at least 1")
+        if not allow_long and not allow_short:
+            raise ValueError("at least one of allow_long / allow_short must be enabled")
         if rebalance_bars < 1:
             raise ValueError("rebalance_bars must be at least 1")
+        if max_hold_intervals is not None and max_hold_intervals < 1:
+            raise ValueError("max_hold_intervals must be at least 1, or None for unlimited")
+        if max_abs_zscore is not None and max_abs_zscore <= min_abs_zscore:
+            raise ValueError(
+                f"max_abs_zscore ({max_abs_zscore}) must exceed min_abs_zscore ({min_abs_zscore})"
+            )
 
         self.lookback = int(lookback)
         self.beta_window = int(beta_window)
         self.reference = reference
         self.mode = mode
         self.n_positions = int(n_positions)
+        self.allow_long = bool(allow_long)
         self.allow_short = bool(allow_short)
         self.min_abs_zscore = float(min_abs_zscore)
+        self.max_abs_zscore = None if max_abs_zscore is None else float(max_abs_zscore)
         self.rebalance_bars = int(rebalance_bars)
+        self.max_hold_intervals = (
+            None if max_hold_intervals is None else int(max_hold_intervals)
+        )
         self.min_eligible = int(min_eligible)
         self.flat_time = flat_time
 
@@ -123,6 +142,29 @@ class CrossSectionalResidualStrategy(Strategy):
         }
         return StrategySignals(target_weights=weights, scores=score, indicators=indicators)
 
+    def setup_features(self, signals, context) -> dict[str, pd.DataFrame]:
+        """The ranking score and the residual move behind it.
+
+        Rebuilt from the indicators the strategy already produced, so there is
+        no hidden state to keep in step with :meth:`generate`.
+
+        ``move_in_vols`` is the accumulated residual expressed in its own
+        trailing standard deviations — how unusual the dislocation was, which is
+        the scale-free version of "how strong was the signal".
+        """
+        score = signals.stack("score")
+        signal = signals.stack("signal")
+        residual_vol = signals.stack("residual_return").rolling(60, min_periods=30).std()
+
+        return {
+            "score": score,
+            "abs_score": score.abs(),
+            "residual_beta": signals.stack("beta"),
+            "residual_signal_bps": signal * 1e4,
+            "move_in_vols": signal
+            / (residual_vol * np.sqrt(self.lookback)).replace(0.0, np.nan),
+        }
+
     # ------------------------------------------------------------- internals
     def _reference_map(self, context: MarketContext) -> dict[str, str]:
         """Which series each symbol is measured against."""
@@ -136,11 +178,19 @@ class CrossSectionalResidualStrategy(Strategy):
     ) -> pd.DataFrame:
         """Turn scores into a held book: select, size, hold, then flatten."""
         selectable = score.where(eligible)
+        if self.max_abs_zscore is not None:
+            # Excluded *before* ranking, so a capped name frees its slot for the
+            # next candidate instead of shrinking the book.
+            selectable = selectable.where(selectable.abs() <= self.max_abs_zscore)
 
-        long_mask = (
-            selectable.rank(axis=1, ascending=False, method="first").le(self.n_positions)
-            & selectable.gt(self.min_abs_zscore)
-        )
+        if self.allow_long:
+            long_mask = (
+                selectable.rank(axis=1, ascending=False, method="first").le(self.n_positions)
+                & selectable.gt(self.min_abs_zscore)
+            )
+        else:
+            long_mask = pd.DataFrame(False, index=score.index, columns=score.columns)
+
         if self.allow_short:
             short_mask = (
                 selectable.rank(axis=1, ascending=True, method="first").le(self.n_positions)
@@ -149,13 +199,14 @@ class CrossSectionalResidualStrategy(Strategy):
         else:
             short_mask = pd.DataFrame(False, index=score.index, columns=score.columns)
 
-        # Each side gets its own half of the gross budget, so an empty short
-        # side leaves capital unused instead of doubling the long exposure.
-        side_budget = 0.5 if self.allow_short else 1.0
+        # Each enabled side gets its own share of the gross budget, so an empty
+        # side leaves capital unused instead of doubling the other one.
+        side_budget = 0.5 if (self.allow_long and self.allow_short) else 1.0
         weights = self._equal_weight(long_mask, side_budget) - self._equal_weight(
             short_mask, side_budget
         )
 
+        weights = self._limit_consecutive_holds(weights, context.index)
         weights = self._hold_between_rebalances(weights, context.index)
         weights = weights.where(eligible.reindex_like(weights), 0.0)
 
@@ -163,6 +214,51 @@ class CrossSectionalResidualStrategy(Strategy):
             cutoff = dt.time.fromisoformat(self.flat_time)
             weights.loc[at_or_after_market_time(context.index, cutoff).to_numpy()] = 0.0
         return weights.fillna(0.0)
+
+    def _limit_consecutive_holds(
+        self, weights: pd.DataFrame, index: pd.DatetimeIndex
+    ) -> pd.DataFrame:
+        """Retire a position that has already had its interval to work.
+
+        A reversion signal is a claim with a deadline: *this has moved too far
+        and should come back within the next interval*. If the name is still at
+        the extreme when the interval ends, the claim has been falsified — the
+        price kept going. Renewing the position there is not acting on a fresh
+        signal, it is doubling down on a rejected one.
+
+        Measured on m5_mine, that renewal was the whole loss: positions released
+        at the first rebalance returned +11.95 bps, while the 13% renewed
+        because they were still extreme returned -54 to -117 bps. (Both figures
+        are conditioned on the outcome and cannot be earned as stated — which is
+        exactly why the fix has to be justified by the mechanism, and then
+        measured honestly end to end.)
+        """
+        if self.max_hold_intervals is None:
+            return weights
+
+        day = session_date(index).to_numpy()
+        bar_of_session = pd.Series(day, index=index).groupby(day).cumcount()
+        is_rebalance = (bar_of_session % self.rebalance_bars == 0).to_numpy()
+
+        grid = weights.loc[is_rebalance]
+        held = np.zeros(grid.shape[1], dtype=int)
+        allowed = np.ones(grid.shape, dtype=bool)
+        previous = np.zeros(grid.shape[1])
+
+        for row in range(len(grid)):
+            wanted = grid.iloc[row].to_numpy()
+            continuing = (wanted != 0) & (np.sign(wanted) == np.sign(previous)) & (previous != 0)
+            held = np.where(continuing, held + 1, np.where(wanted != 0, 1, 0))
+            retire = held > self.max_hold_intervals
+            allowed[row] = ~retire
+            held = np.where(retire, 0, held)
+            previous = np.where(retire, 0.0, wanted)
+
+        limited = weights.copy()
+        limited.loc[is_rebalance] = grid.where(
+            pd.DataFrame(allowed, index=grid.index, columns=grid.columns), 0.0
+        )
+        return limited
 
     @staticmethod
     def _equal_weight(mask: pd.DataFrame, budget: float) -> pd.DataFrame:

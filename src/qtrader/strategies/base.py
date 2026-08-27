@@ -89,6 +89,22 @@ class StrategySignals:
                 f"target_weights must satisfy sum(|w|) <= 1; {gross.max():.4f} at {worst}"
             )
 
+    def stack(self, column: str) -> pd.DataFrame:
+        """Wide ``timestamp x symbol`` frame of one indicator column.
+
+        Strategies already build per-symbol ``indicators`` for charting, so
+        exposing a setup feature is usually just naming one of those columns
+        rather than recomputing it. Symbols missing the column are skipped.
+        """
+        series = {
+            symbol: frame[column]
+            for symbol, frame in self.indicators.items()
+            if column in frame
+        }
+        if not series:
+            raise KeyError(f"no indicator column {column!r} on any symbol")
+        return pd.DataFrame(series)
+
     @property
     def gross_weight(self) -> pd.Series:
         return self.target_weights.abs().sum(axis=1).rename("gross_weight")
@@ -111,3 +127,25 @@ class Strategy(ABC):
     def describe(self) -> dict:
         """Parameters of this instance, recorded in the run manifest."""
         return {"name": self.name, **{k: v for k, v in vars(self).items() if not k.startswith("_")}}
+
+    def setup_features(
+        self, signals: StrategySignals, context: MarketContext
+    ) -> dict[str, pd.DataFrame]:
+        """Quantities describing this strategy's *setup*, for episode analysis.
+
+        Returns ``{name: timestamp x symbol frame}``. Override to expose what
+        the rule actually looked at, so post-trade screening can ask whether it
+        predicted anything (:mod:`qtrader.analysis`). Overriding is optional:
+        every strategy is screened against the universal market features either
+        way, and this only adds its own view.
+
+        Two rules for anything returned here:
+
+        * it must be **comparable across symbols** — a z-score, ratio, count or
+          basis-point quantity. A raw price level is not: pooling a $600 stock's
+          moving average with a $30 stock's measures the universe, not the setup.
+        * it must be **causal**, known at the bar it is indexed on. These frames
+          are sampled at the decision bar and screened against what happened
+          afterwards, so a value that peeked ahead would manufacture an edge.
+        """
+        return {}

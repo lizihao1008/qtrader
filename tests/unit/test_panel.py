@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
 from qtrader.data.panel import BarPanel
 from tests.conftest import make_bars, make_panel, minute_index
@@ -59,3 +60,15 @@ def test_subset_keeps_the_index_and_bars_round_trip():
     bars = panel.bars("BBB")
     assert list(bars.columns) == ["open", "high", "low", "close", "volume"]
     assert bars["close"].tolist() == [20.0, 21.0]
+
+
+def test_replacing_a_field_leaves_the_original_untouched():
+    """Audits rewrite history on a copy; the original panel must not move."""
+    panel = make_panel({"AAA": [10.0, 11.0], "BBB": [20.0, 21.0]})
+    doubled = panel.replace_field("close", panel.close * 2)
+
+    assert doubled.close["AAA"].tolist() == [20.0, 22.0]
+    assert panel.close["AAA"].tolist() == [10.0, 11.0]
+    assert list(doubled.symbols) == list(panel.symbols)
+    with pytest.raises(KeyError):
+        panel.replace_field("nonexistent", panel.close)

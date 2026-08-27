@@ -12,10 +12,11 @@ from __future__ import annotations
 import argparse
 import webbrowser
 
-import _bootstrap  # noqa: F401  (sys.path side effect)
+from _bootstrap import parse_assignments  # noqa: F401  (also sets sys.path)
 
 from qtrader.config import RunConfig
 from qtrader.experiments import save_run
+from qtrader.experiments.splits import apply_split, load_splits
 from qtrader.runner import execute
 
 _HEADLINE = (
@@ -27,10 +28,32 @@ _HEADLINE = (
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
+    parser.add_argument("--split", help="named window from config/splits.yaml")
+    parser.add_argument("--splits-file", default="config/splits.yaml")
+    parser.add_argument(
+        "--set",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="override one strategy parameter; the override is recorded in the manifest",
+    )
     parser.add_argument("--open", action="store_true", help="open the report in a browser")
     args = parser.parse_args()
 
     config = RunConfig.from_yaml(args.config)
+    if args.split:
+        splits = load_splits(args.splits_file)
+        if args.split not in splits:
+            raise SystemExit(f"unknown split {args.split!r}; available: {sorted(splits)}")
+        split = splits[args.split]
+        config = apply_split(config, split)
+        print(f"split {split.describe()}")
+        if split.name == "burned":
+            print("  NOTE this window chose the parameters; it cannot test them.")
+    if args.set:
+        overrides = parse_assignments(args.set)
+        config = config.with_overrides(overrides)
+        print(f"overrides: {overrides}")
     run = execute(config)
     result = run.result
 

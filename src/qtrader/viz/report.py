@@ -48,7 +48,7 @@ _METRIC_FORMATS = {
     "n_sessions": ("Sessions", "int"),
 }
 
-_CSS = """
+REPORT_CSS = """
 body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, sans-serif;
        margin: 0 auto; max-width: 1280px; padding: 24px;
        color: #263238; background: #ffffff; }
@@ -181,6 +181,7 @@ def write_report(
     *,
     subtitle: str = "",
     symbols: tuple[str, ...] = (),
+    max_candles: int | None = None,
 ) -> Path:
     """Render the run to a standalone HTML file and return its path."""
     path = Path(path)
@@ -190,16 +191,19 @@ def write_report(
     equity_html = equity_chart(result).to_html(full_html=False, include_plotlyjs=True)
     exposure_html = exposure_chart(result).to_html(full_html=False, include_plotlyjs=False)
 
+    chart_options = {} if max_candles is None else {"max_candles": max_candles}
     sections = [
         f"<h2>{symbol} — price and executed trades</h2>"
-        + price_chart(result, symbol).to_html(full_html=False, include_plotlyjs=False)
+        + price_chart(result, symbol, **chart_options).to_html(
+            full_html=False, include_plotlyjs=False
+        )
         for symbol in choose_report_symbols(result, symbols)
     ]
 
     html = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <title>{result.name} backtest report</title>
-<style>{_CSS}</style></head>
+<style>{REPORT_CSS}</style></head>
 <body>
 <h1>{result.name} — backtest report</h1>
 <p class="subtitle">{subtitle}</p>

@@ -36,6 +36,13 @@ strategy:
     n_positions: 3          # per side
     allow_short: true
     min_abs_zscore: 1.0     # below this the cross-section has no outliers -> no trade
+    # A residual dislocation this far out of line is more likely information
+    # than noise, and betting on it reverting is betting against news. Both the
+    # mine and validate windows agree that capping beats not capping; the exact
+    # level does NOT replicate, so 1.5 is the round midpoint of the region where
+    # they agree, deliberately not the in-sample optimum (1.58). Even with it
+    # the strategy is break-even at best — see docs/research/R01.
+    max_abs_zscore: 1.5
     rebalance_bars: 120     # refresh the book every 2 hours, session-anchored
     min_eligible: 8         # need breadth before a ranking means anything
     flat_time: "15:50"

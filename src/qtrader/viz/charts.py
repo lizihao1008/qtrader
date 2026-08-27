@@ -24,6 +24,7 @@ from plotly.subplots import make_subplots
 
 from ..backtest.engine import BacktestResult
 from ..data.sessions import MARKET_TZ, RTH_CLOSE, RTH_OPEN
+from ..features.stock import macd
 
 LONG_COLOR = "#26a69a"
 SHORT_COLOR = "#ef5350"
@@ -59,27 +60,39 @@ def _intraday_rangebreaks() -> list[dict]:
 
 
 def price_chart(
-    result: BacktestResult, symbol: str, *, height: int = 880, max_candles: int = MAX_CANDLES
+    result: BacktestResult, symbol: str, *, height: int = 940, max_candles: int = MAX_CANDLES
 ) -> go.Figure:
-    """Candlestick chart for one symbol with indicators, volume and its fills."""
+    """One symbol's candles, volume, MACD, the strategy's own view, and its fills.
+
+    The layout is fixed so that any strategy produces a readable chart:
+
+    * **price** — candles, any price-level indicator lines the strategy exposes,
+      and a marker on every executed fill;
+    * **volume**;
+    * **MACD** — always present. If the strategy publishes its own MACD those
+      series are drawn, since its periods are the ones that mattered; otherwise
+      a standard MACD(12, 26, 9) is computed here as a reference and labelled
+      as such, so a chart never lacks the indicator a reader expects;
+    * **the strategy's own panel** — its score, trend statistic or signal, when
+      it exposes one and it is not already the MACD.
+    """
     bars = result.panel.bars(symbol)
     truncated = len(bars) > max_candles
     if truncated:
         bars = bars.tail(max_candles)
     x = _market_naive(bars.index)
+
     indicators = result.signals.indicators.get(symbol, pd.DataFrame(index=bars.index))
     indicators = indicators.reindex(bars.index)
 
     price_lines = [c for c in indicators.columns if c.startswith(PRICE_LINE_PREFIXES)]
-    lower_panel = _lower_panel_columns(indicators)
+    macd_panel, macd_is_reference = _macd_panel(indicators, bars["close"])
+    strategy_column = _strategy_panel_column(indicators)
 
-    rows = 3 if lower_panel else 2
+    rows = 4 if strategy_column else 3
+    heights = [0.48, 0.10, 0.21, 0.21] if strategy_column else [0.58, 0.12, 0.30]
     fig = make_subplots(
-        rows=rows,
-        cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.03,
-        row_heights=[0.62, 0.13, 0.25][:rows],
+        rows=rows, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=heights
     )
 
     fig.add_trace(
@@ -114,8 +127,9 @@ def price_chart(
         col=1,
     )
 
-    if lower_panel:
-        _add_lower_panel(fig, x, indicators, lower_panel, row=3)
+    _add_macd_panel(fig, x, macd_panel, row=3, reference=macd_is_reference)
+    if strategy_column:
+        _add_series_panel(fig, x, indicators[strategy_column], strategy_column, row=4)
 
     window = f", last {len(bars):,} bars" if truncated else ""
     fig.update_layout(
@@ -133,46 +147,59 @@ def price_chart(
     return fig
 
 
-def _lower_panel_columns(indicators: pd.DataFrame) -> list[str]:
-    """Indicator columns that need their own axis below the price panel."""
-    for group in (("macd", "macd_signal", "macd_hist"), ("score",), ("signal",)):
-        present = [c for c in group if c in indicators.columns]
-        if present:
-            return present
-    return []
+def _macd_panel(indicators: pd.DataFrame, close: pd.Series) -> tuple[pd.DataFrame, bool]:
+    """The strategy's MACD if it publishes one, otherwise a standard reference."""
+    published = [c for c in ("macd", "macd_signal", "macd_hist") if c in indicators.columns]
+    if published:
+        return indicators[published], False
+    return macd(close), True
 
 
-def _add_lower_panel(
-    fig: go.Figure, x: pd.DatetimeIndex, indicators: pd.DataFrame, columns: list[str], *, row: int
+def _strategy_panel_column(indicators: pd.DataFrame) -> str | None:
+    """The one series that best represents what this strategy was watching."""
+    for column in ("score", "trend_zscore", "signal"):
+        if column in indicators.columns:
+            return column
+    return None
+
+
+def _add_macd_panel(
+    fig: go.Figure, x: pd.DatetimeIndex, panel: pd.DataFrame, *, row: int, reference: bool
 ) -> None:
-    """Draw MACD (bars + lines) or a single score series in the bottom panel."""
-    if "macd_hist" in columns:
-        colors = [LONG_COLOR if v >= 0 else SHORT_COLOR for v in indicators["macd_hist"]]
+    """Histogram bars plus whichever MACD lines are available."""
+    if "macd_hist" in panel:
+        colors = [LONG_COLOR if v >= 0 else SHORT_COLOR for v in panel["macd_hist"]]
         fig.add_trace(
-            go.Bar(x=x, y=indicators["macd_hist"], name="MACD hist",
+            go.Bar(x=x, y=panel["macd_hist"], name="MACD hist",
                    marker_color=colors, showlegend=False),
             row=row,
             col=1,
         )
-        for column in ("macd", "macd_signal"):
-            fig.add_trace(
-                go.Scatter(x=x, y=indicators[column], mode="lines", name=column.upper(),
-                           line=dict(width=1.3)),
-                row=row,
-                col=1,
-            )
-        fig.update_yaxes(title_text="MACD", row=row, col=1)
-        return
+    for column, width in (("macd", 1.4), ("macd_signal", 1.2)):
+        if column not in panel:
+            continue
+        fig.add_trace(
+            go.Scatter(x=x, y=panel[column], mode="lines", name=column.upper(),
+                       line=dict(width=width)),
+            row=row,
+            col=1,
+        )
+    label = "MACD (12,26,9 ref)" if reference else "MACD"
+    fig.update_yaxes(title_text=label, row=row, col=1)
 
-    column = columns[0]
+
+def _add_series_panel(
+    fig: go.Figure, x: pd.DatetimeIndex, series: pd.Series, name: str, *, row: int
+) -> None:
+    """A single strategy series with a zero line for reference."""
     fig.add_trace(
-        go.Scatter(x=x, y=indicators[column], mode="lines", name=column.upper(),
+        go.Scatter(x=x, y=series, mode="lines", name=name.upper(),
                    line=dict(width=1.3, color=ACCENT_COLOR)),
         row=row,
         col=1,
     )
     fig.add_hline(y=0, line=dict(width=1, color=FLAT_COLOR), row=row, col=1)
-    fig.update_yaxes(title_text=column.replace("_", " ").title(), row=row, col=1)
+    fig.update_yaxes(title_text=name.replace("_", " ").title(), row=row, col=1)
 
 
 def _add_trade_markers(

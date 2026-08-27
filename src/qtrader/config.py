@@ -13,7 +13,7 @@ environment only.
 from __future__ import annotations
 
 import datetime as dt
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 
 import yaml
@@ -66,6 +66,11 @@ class RunConfig:
     #: Symbols to draw K-line charts for. Empty means "the most-traded symbol".
     report_symbols: tuple[str, ...] = ()
 
+    #: Bars charted per symbol, counted back from the end. Lets a run load
+    #: warm-up history without the chart being dominated by it. ``None`` uses
+    #: the chart's own cap.
+    report_max_candles: int | None = None
+
     @classmethod
     def from_yaml(cls, path: Path | str) -> "RunConfig":
         path = Path(path)
@@ -81,6 +86,7 @@ class RunConfig:
             data_root=raw.get("data_root", "data"),
             results_root=raw.get("results_root", "results"),
             report_symbols=tuple(raw.get("report", {}).get("symbols", [])),
+            report_max_candles=raw.get("report", {}).get("max_candles"),
         )
 
     def universe(self) -> Universe:
@@ -99,10 +105,27 @@ class RunConfig:
             "data_root": self.data_root,
             "results_root": self.results_root,
             "report_symbols": list(self.report_symbols),
+            "report_max_candles": self.report_max_candles,
         }
 
     def output_dir(self) -> Path:
         return Path(self.results_root) / self.run_id
+
+    def with_overrides(self, params: dict) -> "RunConfig":
+        """A copy with strategy parameters replaced and the run id marked.
+
+        The id has to change: an override that wrote to the same directory as
+        the baseline would quietly replace it, and a comparison where one side
+        has been overwritten by the other is worse than no comparison.
+        """
+        if not params:
+            return self
+        label = "_".join(f"{name}{value}" for name, value in params.items())
+        return replace(
+            self,
+            run_id=f"{self.run_id}__{label}",
+            strategy=replace(self.strategy, params={**self.strategy.params, **params}),
+        )
 
 
 def _as_dict(obj) -> dict:

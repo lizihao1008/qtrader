@@ -139,3 +139,19 @@ def test_future_bars_cannot_change_past_fills():
         return result.fills.loc[result.fills["timestamp"] < cut].reset_index(drop=True)
 
     pd.testing.assert_frame_equal(fills_before_cut(prices), fills_before_cut(tampered))
+
+
+def test_no_fill_is_possible_on_a_bar_that_did_not_print():
+    """A resting order in a bar where nothing traded does not get filled.
+
+    The liquidity mask tolerates a few silent bars — that is a judgement about
+    whether a symbol is worth trading. Whether a fill can happen at all is a
+    different question, answered by the execution bar itself.
+    """
+    context = make_context({"AAA": [100.0] * 6, "SPY": [10.0] * 6})
+    # Liquid by every measure, but the entry bar itself has no print.
+    context.panel.traded.loc[context.index[2], "AAA"] = False
+    signals = weights_from(context, {"AAA": [0.0, 1.0, 1.0, 1.0, 1.0, 1.0]})
+
+    result = BacktestEngine(FREE, ExecutionConfig(initial_cash=10_000.0)).run(context, signals)
+    assert result.fills.iloc[0]["timestamp"] == context.index[3]  # deferred, not filled at 2

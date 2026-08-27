@@ -79,3 +79,22 @@ class MACrossStrategy(Strategy):
             for symbol in symbols
         }
         return StrategySignals(target_weights=weights, indicators=indicators)
+
+    def setup_features(self, signals, context) -> dict[str, pd.DataFrame]:
+        """The crossover expressed scale-free.
+
+        The moving averages themselves are price levels and would be useless
+        pooled across symbols, so what is exposed is the *gap* between them as a
+        fraction of price, in basis points — the same quantity for a $600 stock
+        and a $30 one.
+        """
+        close = context.panel.close[list(context.symbols)]
+        fast_ma = signals.stack(f"sma_{self.fast}")
+        slow_ma = signals.stack(f"sma_{self.slow}")
+
+        features = {"ma_gap_bps": (fast_ma - slow_ma) / close * 1e4}
+        try:
+            features["macd_hist_bps"] = signals.stack("macd_hist") / close * 1e4
+        except KeyError:
+            pass
+        return features

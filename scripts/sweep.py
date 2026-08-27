@@ -17,6 +17,7 @@ import _bootstrap  # noqa: F401  (sys.path side effect)
 
 from qtrader.config import RunConfig
 from qtrader.experiments import sweep
+from qtrader.experiments.splits import apply_split, load_splits
 
 
 def parse_value(text: str):
@@ -47,9 +48,17 @@ def main() -> None:
     parser.add_argument("--grid", action="append", required=True,
                         help="strategy parameter to vary, e.g. rebalance_bars=5,15,30")
     parser.add_argument("--ic-horizon", default="30b")
+    parser.add_argument("--split", help="named window from config/splits.yaml")
+    parser.add_argument("--splits-file", default="config/splits.yaml")
     args = parser.parse_args()
 
     config = RunConfig.from_yaml(args.config)
+    if args.split:
+        splits = load_splits(args.splits_file)
+        if args.split not in splits:
+            raise SystemExit(f"unknown split {args.split!r}; available: {sorted(splits)}")
+        config = apply_split(config, splits[args.split])
+        print(f"split {splits[args.split].describe()}\n")
     grid = parse_grid(args.grid)
 
     table = sweep(config, grid, ic_horizon=args.ic_horizon)

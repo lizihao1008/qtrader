@@ -1,0 +1,67 @@
+# Cross-sectional residual reversal on 5-minute bars.
+#
+# Motivated by a rank-IC scan over m5_mine rather than by a backtest: on this
+# universe at 5-minute resolution the trend signal has reliably NEGATIVE
+# information (IC -0.005 to -0.010, t = -2.6 to -4.7) while residual reversal
+# has reliably positive information (IC +0.023 at a 12-bar horizon, t = +12.8).
+# Measure first, trade second.
+#
+# The 1-minute version of this strategy (docs/research/R01) failed out of
+# sample. This is a different test: different bar size, different lookback,
+# different regime, and — importantly — none of R01's fitted parameters are
+# carried over. `max_abs_zscore` in particular was mined on 1-minute data and is
+# deliberately left off.
+#
+# Parameters in bars are chosen from the IC scan, not searched:
+#   lookback 12 bars = 60 minutes, the horizon where residual reversal's IC is
+#   most stable across forward horizons (+0.020 to +0.023 at h=1..12).
+
+run_id: xsec_reversal_5min
+
+universe: config/universe/us_liquid_22.yaml
+
+data:
+  timeframe: 5Min
+  feed: iex
+  start: "2024-01-02"
+  end: "2026-08-27"
+  regular_hours_only: true
+
+strategy:
+  name: cross_sectional_residual
+  params:
+    lookback: 12            # 60 minutes of residual accumulated into the score
+    beta_window: 24         # 120 minutes for the beta to the sector ETF
+    reference: sector
+    mode: reversion
+    n_positions: 3
+    allow_short: true
+    min_abs_zscore: 1.0
+    max_abs_zscore: null    # NOT carried over from the 1-minute mining
+    rebalance_bars: 12      # refresh hourly, session-anchored
+    min_eligible: 8
+    flat_time: "15:50"
+
+liquidity:
+  min_price: 5.0
+  min_dollar_volume: 100000.0
+  lookback_bars: 12
+  max_stale_bars: 2
+
+costs:
+  half_spread_bps: 1.0
+  slippage_bps: 0.5
+  commission_bps: 0.0
+  commission_per_share: 0.0
+  min_commission: 0.0
+
+execution:
+  initial_cash: 100000.0
+  gross_leverage: 0.95
+  execution_lag_bars: 1
+  execution_price: open
+  whole_shares: true
+  min_trade_notional: 250.0
+
+report:
+  symbols: [NVDA, TSLA]
