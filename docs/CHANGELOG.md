@@ -1,5 +1,62 @@
 # Changelog
 
+## 2026-08-26 (what is left, and what would break through)
+
+### Findings
+
+- `docs/research/R06-what-is-left.md` — every remaining possibility in the
+  current data assessed against the gate.
+  - **IEX coverage measured: 2.1% of AAPL's tape** (13,268 shares per 5-minute
+    bar against ~640,000 consolidated), median trade size 76 shares. This is the
+    root cause behind several rejections.
+  - `trade_count` / average trade size rejected: bar data cannot sign the flow,
+    and a 2% retail-skewed sample is the wrong population for inferring
+    institutional footprints.
+  - `vwap`, ETF-constituent dislocation and sector lead-lag all rejected on
+    incremental information or on being a microsecond taker's game.
+  - Overnight/intraday decomposition is the only survivor and is marginal: it
+    passes mechanism, side-of-trade and cost, fails incremental information, and
+    is a known risk premium rather than an alpha.
+  - ML/deep learning on price bars rejected as a class — same inputs, more
+    parameters, which is the failure mode the gate exists to prevent.
+- Recommendation recorded: move to daily-horizon cross-sectional US equity,
+  which fixes the cost-to-holding-period ratio rather than working around it.
+  Trend following's honest venue is futures; R04/R05's negative result is
+  venue-specific.
+
+## 2026-08-26 (falsification-first: a gate in front of the backtester)
+
+### Added
+
+- `docs/research/GATE.md` — what an idea must survive before any strategy code
+  is written: a named mechanism with a counterparty, a reason it has not been
+  arbitraged away, **which side of the trade is paid and whether this project's
+  execution can be on that side**, an edge stated before backtesting that is
+  several times the ~2.4 bps round trip, incremental information rather than
+  another transform of past prices, and a named failure regime.
+- `docs/adr/ADR-0006-falsification-first.md`.
+
+### Changed
+
+- Existing strategies relabelled rather than removed. `ma_cross` is a plumbing
+  fixture, not a candidate. `trend_ratchet` and `cross_sectional_residual` are
+  retired as candidates and retained as worked examples with their
+  falsifications documented.
+- Rejected as a class without further testing: oscillator and moving-average
+  variants, breakout rules, and further reparameterisations of trailing-return
+  signals. They are not new experiments.
+
+### Findings
+
+- The reversal mechanism is weaker than it first appeared. Inventory
+  compensation predicts the edge should scale with the spread; measured, the
+  spread more than doubles (1.04 → 2.42 bps) while the edge moves 14%
+  (+2.90 → +3.30 bps). The pure liquidity-provision story does not fit, which
+  under the gate is a rejection rather than a footnote.
+- Applied honestly the gate rejects everything in the repository, and would
+  reject most ideas proposable within intraday US large caps on IEX data. The
+  binding constraint is the venue, not idea generation.
+
 ## 2026-08-26 (do trends exist? shuffle test)
 
 ### Validation

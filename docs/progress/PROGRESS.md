@@ -2,14 +2,23 @@
 
 ## Goal
 
-Migrate the strategy to 5-minute bars with a full timeframe and execution audit,
-then run an autonomous hypothesis -> change -> backtest -> validate loop until a
-candidate with stable out-of-sample positive expectancy is found, or until it is
-established that none exists.
+Operate falsification-first: reject weak hypotheses on paper before implementing
+them, rather than after backtesting them. Ideas must pass
+[the gate](../research/GATE.md) before any strategy code is written.
 
 ## Current State
 
-Complete, with a negative result.
+Research mode changed (ADR-0006). Applied honestly, the gate rejects
+**everything currently in the repository**:
+
+| strategy | verdict |
+| --- | --- |
+| `ma_cross` | not a strategy — plumbing fixture only |
+| `trend_ratchet` | rejected: no mechanism at intraday horizons, IC wrong-signed |
+| `cross_sectional_residual` | rejected on mechanism: the effect pays the liquidity *provider*, and this project is a *taker* |
+| volatility forecasting | not an alpha — infrastructure for sizing and stops |
+
+The prior search is complete, with a negative result.
 
 **On this universe, at these horizons, with IEX data and realistic costs, the
 current design has no reliable positive expectancy.** Nine backtests, ~200
@@ -176,6 +185,21 @@ Tested directly, since it decides whether any momentum work is worth doing here:
 - **Volatility IC +0.67 vs direction IC −0.023.** Magnitude is predictable,
   direction is not. That is the asymmetry behind the whole result.
 
+## What remains with the current data (R06)
+
+Assessed against the gate; only one candidate survives and it is weak:
+
+| candidate | verdict |
+| --- | --- |
+| order flow from `trade_count` | **rejected** — flow cannot be signed from bar data, and IEX is 2.1% of AAPL's tape at a 76-share median trade |
+| `vwap` | rejected — a transform of prices already tested |
+| ETF vs constituent dislocation | rejected — microsecond game, wrong side, unmeasurable at 2% coverage |
+| sector-ETF lead-lag | rejected — closed well inside one 5-minute bar |
+| overnight vs intraday split | **marginal** — passes mechanism/side/cost, fails incremental information. A known risk premium, not an alpha |
+
+**With this data there is essentially nothing worth building.** That is a
+statement about the venue, not about idea generation.
+
 ## Next Actions
 
 Not more parameters — the search above exhausted that. Three things would change
@@ -191,6 +215,13 @@ the arithmetic:
 3. **A genuinely different input.** Every signal tried was a function of past
    returns. The measurement framework is signal-agnostic and would give a
    straight answer about something else.
+0. **Move to daily-horizon cross-sectional US equity** (R06 recommendation).
+   The only change that attacks the binding constraint rather than working
+   around it: cost stays ~2.4 bps per round trip while holding goes from an hour
+   to weeks, latency stops mattering, and breadth rises ~50x. The pipeline,
+   splits, attribution, shuffle tests and ledger all carry over unchanged.
+   If the interest is specifically trend following, its honest home is futures —
+   R04/R05's negative result is venue-specific and does not transfer.
 4. **Trade the thing that is actually predictable.** Volatility forecasts at
    IC +0.67 are the strongest signal found anywhere in this project. They cannot
    be harvested by buying and selling stock, which needs direction, but they are
