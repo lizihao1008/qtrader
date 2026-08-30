@@ -1,5 +1,439 @@
 # Changelog
 
+## 2026-08-30 (Kronos agreement required; previous-day bars removed)
+
+Two instructions, both implemented in full and made the config default. This
+entry records what they cost.
+
+### Added
+
+- `docs/HOWTO-galleries.md` — the commands to run the win/loss galleries and the
+  related diagnostics, per strategy.
+- `viz.setups.setup_gallery` is now strategy-agnostic: the level lines and zone
+  are drawn only when the strategy publishes them, and the page title and legend
+  adapt. Galleries rendered for all four registered strategies.
+- `docs/research/R11-kronos-required-no-prior-day.md`.
+- `average_true_range` takes `restart`, so the previous close is not carried
+  across a session boundary.
+- `config/backtest/sr_momentum_5min.yaml` now sets `use_previous_day: false`,
+  `require_retest: false`, `sizing: equal`, `confirmation_path` and
+  `confirmation_min: 0.0`, each with the measurement that justifies it.
+
+### Fixed
+
+- **ATR leaked the overnight gap into the break-zone width.** Today's first bar
+  had a true range of `|high - yesterday's close|`, and ATR sets `level_zone`,
+  which decides what counts as a break. Yesterday's price was setting today's
+  break tolerance. Now session-local; pinned by a test.
+
+### Findings
+
+- **Removing previous-day levels is a small improvement**: total return
+  +4.56% -> **+4.86%**, gross +4.27 -> +4.33 bps, hit rate 45.5% -> 45.7%.
+  Consistent with R07, which had already measured that level family as null.
+- **Requiring Kronos agreement costs about 12 points of total return**:
+  +4.86% -> **-7.49%**, hit rate 45.7% -> 43.0%, maxDD -8.60% -> -14.15%. At a
+  0.25 sigma threshold, -9.34%. Verified binding: all 40 charted panels carry an
+  agreement mark.
+- **The raw conditional is the strongest sign of life Kronos has shown**, and is
+  still not significant: among trades taken without the filter, agreement is
+  worth +6.84 bps against +2.72 for disagreement, **+4.12 bps at t = +0.83**
+  (against +0.28 bps at t = +0.06 in R09).
+- **Book capacity explains the gap, and this is the third appearance of the
+  effect** (blackout in R10 §3, filter in R09, filter here). `max_positions=6`
+  binds, so a veto does not remove an opportunity — it frees a slot that
+  `_respect_book_limit` fills with a weaker candidate. Trades *rise* 2,761 ->
+  2,923; turnover 2.50 -> 2.64x/day.
+- Widening the book so a veto removes rather than reshuffles (12 slots at 0.075,
+  same gross exposure) does not rescue the filter (-4.82% control -> -8.41%
+  filtered) and is itself very costly: **the six-slot cap was doing real
+  selection**, ranking candidates by `|momentum_z|` and keeping the strongest.
+
+### Validation
+
+- 248 tests pass. New: 1 pinning the ATR session boundary, 1 for a strategy
+  with no level columns still rendering.
+- Trials 29-33 recorded in the ledger; `m5_mine` now carries 33.
+
+## 2026-08-29 (where the trades are, and what they should have cost)
+
+Prompted by an observation on the setup charts that most decisions looked like
+they were made on the opening gap. The observation was right; the diagnosis and
+the proposed remedy were not, and chasing it down found a larger problem.
+
+### Added
+
+- `sr_momentum` gains `no_entry_before`, a clock-based session-open blackout
+  symmetric with `no_entry_after`. Implemented, tested, and left **unset** — see
+  Findings.
+- `sr_momentum` gains `sizing` (`risk` | `equal`).
+- `sr_momentum` gains `require_retest`, and publishes `watched_age` so the
+  break state machine can be inspected from the episode bars.
+- `sr_momentum` gains `momentum_estimator` (`session` | `ewma`) and
+  `momentum_span`, matching the convention `trend_ratchet` already uses. Default
+  unchanged.
+- `viz.setups` panels now mark the **peak** — the best the trade ever looked
+  between entry and exit — so the gap between it and the exit is visible.
+- `docs/research/R10-open-concentration-and-costs.md`.
+
+### Findings
+
+- **49% of all entries are decided on bar 1 (09:35-09:40)**, 68% in the first
+  thirty minutes.
+- **The cause is round numbers, not previous-day gaps.** 76% of entries come
+  from the round-number family against 14% from previous-day levels. $1 round
+  levels are never far from the price, and the opening bars carry 41 bps of
+  realised 5-minute volatility against 12 bps at 15:20, so levels get broken and
+  retested constantly. (Attribution must be matched across the retest window:
+  round levels are recomputed every bar, so matching only at the entry bar
+  mislabels 42% of trades.)
+- **Delaying entries makes it worse**: gross/trade +3.50 -> +0.40 (09:40) ->
+  -0.27 (10:20), total return -3.02% -> -6.37% -> -11.28%. Turnover *rises*,
+  1.80x -> 2.28x/day, because a blackout delays a live setup rather than
+  cancelling it — the break re-registers every bar and the entry lands on the
+  first admitted bar.
+- **Dropping previous-day levels gives the first positive total return in the
+  project** (+0.30%, gross +4.62 bps at t = +1.96, Sharpe +0.07). It should not
+  be believed: it is trial 18 against `m5_mine`, where the Bonferroni threshold
+  is |t| ~ 3.0, and half its trades sit in the bucket the cost model
+  undercharges.
+- **The cost model is flat and the spread is not.** Roll (1984) half-spreads on
+  1-minute bars: 4.91 bps at 09:31-09:35 against 0.34 bps at 11:30-14:30 —
+  **14x**. The configs charge 1.0 bps everywhere, which is ~3x conservative
+  mid-day and ~5x optimistic in the first five minutes. Half of this strategy's
+  trades are in the second group.
+- **Under measured spreads both variants are clearly negative**: baseline
+  +0.50 -> **-3.09 bps/trade**, no-previous-day +1.62 -> **-2.06 bps/trade**.
+  Breakeven half-spread for the bar 0-1 bucket is 3.66-3.96 bps against 4.91
+  measured.
+- **This inflates every earlier number in the project** in proportion to how
+  much of its turnover sits in the first half hour.
+
+- **Why it performs so badly, decomposed.** The exit is not the fault: the
+  ratchet beats every fixed horizon tested (+3.50 bps against a best fixed of
+  +1.78 at 48 bars), and winners capture 64% of their maximum favourable
+  excursion. The fault is entry direction — **66% of losing trades never saw
+  their favourable excursion reach even half their adverse one**, mean MFE +38
+  against MAE -98. They were wrong from the first bar.
+- **The whole edge is 2 percentage points of win rate before costs**: 45.3%
+  against a 43.3% breakeven, on a standard error of 0.94 points. About 2 sigma,
+  matching the t = +1.51 on gross by an independent route.
+- **The delay destroys it by selection, not by timing.** The payoff ratio
+  improves (1.31 -> 1.44) while the win rate collapses through its own
+  breakeven (45.3% -> 40.7% against 40.9%). A break-and-retest still alive at
+  bar 10+ is one where price *failed to run* — waiting keeps the failures and
+  discards the setups that resolved immediately.
+
+- **`session_drift_zscore` measures position, not direction.** It is
+  `sum(r since the open)/(sigma*sqrt(n))`, so a large early move fixes its sign
+  for the rest of the session. Worked example (TSLA 2025-01-30, short at 10:25,
+  -324 bps): drift since the open -284 bps giving `momentum_z` -1.09, while the
+  last 6 bars were **+120 bps** and the session low was 25 minutes old. The
+  filter said "short" into a 25-minute rally.
+- **Fixing it makes the backtest worse**: gross/trade +3.50 (session) -> +2.98
+  (ewma span 12) -> +1.13 (ewma span 6). The reason is a direct slice: 19% of
+  entries are taken *against* the last six bars and those earn +6.58 bps against
+  +2.77 for the ones that agree. The stale indicator was accidentally producing
+  counter-trend entries, and on this universe fading beats following (R04/R05:
+  momentum rank IC -0.023, t = -11.2). Broken on mechanics, broken in the
+  profitable direction.
+- **Requiring Kronos agreement is worth +0.28 bps at t = +0.06** over all 2,750
+  scored trades (agreed 45.8% hit / +3.86 bps on 33% of the book; disagreed
+  45.2% / +3.58 bps). This is less damaging than R09's backtest, which showed
+  +3.50 -> +1.13: the two reconcile because vetoing frees position slots and the
+  replacement trades are worse. Most of R09's damage was that indirect effect,
+  not the filter's own selection.
+- **The higher-low structural objection is not distinguishable from noise.**
+  Trading against the session structure: -1.35 bps against +0.57 with it,
+  difference t = -0.37 on n = 903. Sharper on the short leg (-4.63 vs +5.31) but
+  on 121 trades, and the long leg flips sign — and it contradicts the "fights
+  the last six bars" slice on a larger sample.
+
+- **The late entry in the charted TSLA loser was caused by the blackout.**
+  Baseline entered 09:40 at 395.60 as price left the 400 level, before the fall
+  to 386. With `no_entry_before=10:20` the first admissible bar was 10:25, 25
+  minutes after the low, into the rally: -324 bps. The delay does not take the
+  same trade later, it takes the reversal.
+- **With the state machine corrected, entering on the break beats waiting for
+  the retest**: gross +4.25 bps (t = +1.84) against +3.70 (t = +1.61), maxDD
+  -6.22% against -8.35%. Still under Bonferroni for 26 trials (|t| ~ 3.2), and
+  R10 §5's cost finding applies unchanged. Config default stays
+  `require_retest: true`, which is what the report specifies.
+
+- **Position sizing was anti-correlated with the edge — this is why total
+  return stayed negative while per-trade expectancy was positive.**
+  `weight = risk_per_trade / (stop_sigmas * sigma_H)` gives a tight stop a large
+  position, so `corr(sigma, notional) = -0.897`. But the edge here grows with
+  volatility: lowest-vol quintile -1.44 bps at a 38% win rate, highest-vol
+  +7.45 bps at 51%. The strategy bet most on its worst trades. Equal-weighted
+  mean +1.25 bps against a notional-weighted **-0.83 bps** — that gap is the
+  entire discrepancy. Not a bug; the textbook rule, wrong for an edge that
+  scales with volatility.
+- With only the sizing changed, total return goes **-2.17% -> +4.56%**
+  (Sharpe +0.41, maxDD -8.00%, gross +4.27 bps at t = +1.85). Same entries,
+  exits and fills.
+- **The win rate was never the problem**: 45.5% against a 43.0% breakeven,
+  carried by a payoff ratio above 1.
+- **It still fails on honest costs.** Equal sizing raises the share of trades in
+  the first two bars from 49% to 58%, because it stops shrinking positions in
+  the volatile names the open produces. At measured spreads the variant runs
+  **-2.99 bps/trade**; the bar 0-1 bucket needs a half-spread under 2.25 bps
+  against 4.91 measured.
+
+### Validation
+
+- 246 tests pass. New: 3 for the sizing rules; 2 pinning the break state machine (register once, then
+  age; expire after `retest_bars`); 4 for the blackout, including one asserting that it
+  *delays rather than cancels*, because that changes how its backtest reads;
+  2 for the peak marker; 2 for the momentum estimator, including one that pins
+  the `session` estimator's inability to reverse after a large early move.
+- Trials 16-21 recorded in `results/search/ledger.jsonl`.
+
+### Not done, deliberately
+
+- **A time-of-day cost model was not built.** It is now the highest-value change
+  in the repository, but it touches `backtest/costs.py`, needs regression tests,
+  and would re-score every recorded result — too large to slip in as a side
+  effect of an entry-timing question. Recorded as the next action.
+
+## 2026-08-29 (S/R + momentum + Kronos: implemented, measured, falsified)
+
+The conjunction rejected on paper in R08 was implemented in full at the project
+owner's direction, so that the argument would be settled by measurement rather
+than by assertion. It was, and the measurement agrees with the paper argument.
+
+### Added
+
+- `src/qtrader/features/levels.py` — ex-ante support/resistance. Previous-day
+  high/low, opening-range high/low (NaN until the range has closed), round
+  numbers, Wilder ATR, and the `max(1 tick, level_atr x ATR)` tolerance zone.
+  Every level is knowable at the bar it is attached to; the alternative is
+  hindsight charting.
+- `src/qtrader/strategies/sr_momentum.py` — break -> retest -> hold, gated on
+  momentum sign, relative volume and VWAP side, released by the same monotone
+  volatility ratchet `trend_ratchet` uses. Publishes a `candidate` column so a
+  heavy external model can be scored once on proposed entries and cached.
+- `src/qtrader/models/kronos_confirm.py` + `scripts/kronos_confirm.py` — batched
+  Kronos scoring of candidates. The context window ends **at the candidate bar
+  inclusive**; the forecast begins after it. The predictor is injected, so the
+  module carries no torch dependency and stays testable without one.
+- `scripts/analyze_confirmation.py` — asks whether a confirmation score has any
+  rank IC against the realised outcome of the candidates, before any backtest is
+  written. Seconds instead of a backtest, and decisive.
+- `config/backtest/sr_momentum_5min.yaml` — the report's stated starting values,
+  not search results.
+- `src/qtrader/viz/setups.py` — `setup_gallery`, the real-price counterpart to
+  `episode_gallery`. Panels keep actual prices (a support level does not survive
+  being rescaled per panel) and carry the level the rule watched with its
+  tolerance zone, the entry marker pointing the predicted direction, and the
+  Kronos forecast close path drawn forward from the decision bar.
+- `scripts/plot_setups.py` — 20 best and 20 worst round trips as two galleries,
+  rendered by identical code onto identical axes so only the data differs.
+- `sr_momentum` now publishes `watched_level`, `watched_side`, `zone` and each
+  level family as indicator columns. `analysis.episodes._window` already copies
+  every indicator into the episode bars, so the charts get them with no new
+  plumbing — and the level drawn is the one recorded inside the bar loop at the
+  moment of the decision, never redrawn afterwards from the finished chart.
+- `models.kronos_confirm.forecast_paths` — the forecast paths themselves rather
+  than the scalar score, sharing one window builder with `score_candidates` so
+  the two cannot drift apart on causality.
+- `docs/research/R09-sr-momentum-kronos.md`.
+
+### Fixed
+
+- **The retest was never filtering anything.** `_track_break` tested "price is
+  beyond a level" rather than "price was not already beyond it", so a break
+  re-registered every bar, resetting `broke_age` to 0 and clearing `retested`;
+  the same call then re-set it if that bar's range straddled the zone. 81.4% of
+  live breaks sat at age 0. "Break -> come back -> retest -> hold" was in
+  practice a single-bar test of "price is beyond the level and this bar
+  straddles it". A break now registers once and ages; age-0 share falls to
+  42.3%. Two regression tests pin it. Found because removing the retest
+  requirement altogether changed the trade count by 19 out of 2,788.
+
+- **`nearest_round_levels` bracketed the current close**, making
+  `price > resistance` unsatisfiable and the entire round-number level family
+  inert. The reference is now the previous bar's brackets, which is also the
+  only causal version. Candidates 5,762 -> 15,646; the first baseline (+2.72 bps
+  gross) is void and was superseded. Caught by writing the unit tests, not by
+  reading the output — a silently dead component does not announce itself.
+
+### Findings
+
+- **Baseline `sr_momentum` on `m5_mine`, 2,788 trades: gross +3.50 bps at
+  t = +1.51**, cost 3.00 bps, hit rate 44.1%, mean hold 48 bars. Total return
+  −3.02%, Sharpe −0.47, maxDD −8.95%. Indistinguishable from zero, as R07
+  (levels) and R04/R05 (intraday momentum) both predicted. Per-trade expectancy
+  is +0.50 bps while the capital-weighted return is negative: the losers are in
+  the larger positions, which is a sizing artefact and not an edge.
+- **Kronos has no directional information about these entries.** Over 15,645
+  scored candidates it agrees with the realised direction **49.3%** of the time
+  at a 12-bar horizon (rank IC −0.0108, t = −1.35) and 49.1% at 48 bars
+  (IC −0.0173, t = −2.16). The ">50% win rate" claim does not transfer to
+  5-minute US large caps against a 3 bps round trip.
+- **The filter makes the strategy monotonically worse.** Hit rate 44.1% ->
+  41.4% -> 40.6% -> 40.4% as the threshold tightens through 0 / 0.25 / 0.50
+  sigma; gross per trade falls from +3.50 to ~+1.2 bps and stays there. The
+  short leg, the only positive sleeve at +4.95 bps gross, is turned negative.
+  The filter removes winners slightly faster than losers.
+- R08's arithmetic is confirmed on both halves: `A` uninformative (t = +1.51),
+  `B` uninformative (IC ~ 0), so the conjunction is uninformative on a smaller
+  sample.
+- **The charts show a real setup with no conditioning power.** Every one of the
+  40 charted panels has a genuine level being broken and retested, and winners
+  are indistinguishable from losers in the bars before entry. Kronos agreed with
+  the direction on 8 of 20 winners and 6 of 20 losers — noise on hand-picked
+  extremes, pointing the same way as the rank IC.
+- **Horizon mismatch worth naming**: Kronos was asked for 12 bars while the mean
+  hold is 48. Measuring the score against a 48-bar outcome does not rescue it
+  (IC -0.017), but the filter was never looking at the horizon it authorised.
+
+- **`session_drift_zscore` measures position, not direction.** It is
+  `sum(r since the open)/(sigma*sqrt(n))`, so a large early move fixes its sign
+  for the rest of the session. Worked example (TSLA 2025-01-30, short at 10:25,
+  -324 bps): drift since the open -284 bps giving `momentum_z` -1.09, while the
+  last 6 bars were **+120 bps** and the session low was 25 minutes old. The
+  filter said "short" into a 25-minute rally.
+- **Fixing it makes the backtest worse**: gross/trade +3.50 (session) -> +2.98
+  (ewma span 12) -> +1.13 (ewma span 6). The reason is a direct slice: 19% of
+  entries are taken *against* the last six bars and those earn +6.58 bps against
+  +2.77 for the ones that agree. The stale indicator was accidentally producing
+  counter-trend entries, and on this universe fading beats following (R04/R05:
+  momentum rank IC -0.023, t = -11.2). Broken on mechanics, broken in the
+  profitable direction.
+- **Requiring Kronos agreement is worth +0.28 bps at t = +0.06** over all 2,750
+  scored trades (agreed 45.8% hit / +3.86 bps on 33% of the book; disagreed
+  45.2% / +3.58 bps). This is less damaging than R09's backtest, which showed
+  +3.50 -> +1.13: the two reconcile because vetoing frees position slots and the
+  replacement trades are worse. Most of R09's damage was that indirect effect,
+  not the filter's own selection.
+- **The higher-low structural objection is not distinguishable from noise.**
+  Trading against the session structure: -1.35 bps against +0.57 with it,
+  difference t = -0.37 on n = 903. Sharper on the short leg (-4.63 vs +5.31) but
+  on 121 trades, and the long leg flips sign — and it contradicts the "fights
+  the last six bars" slice on a larger sample.
+
+- **The late entry in the charted TSLA loser was caused by the blackout.**
+  Baseline entered 09:40 at 395.60 as price left the 400 level, before the fall
+  to 386. With `no_entry_before=10:20` the first admissible bar was 10:25, 25
+  minutes after the low, into the rally: -324 bps. The delay does not take the
+  same trade later, it takes the reversal.
+- **With the state machine corrected, entering on the break beats waiting for
+  the retest**: gross +4.25 bps (t = +1.84) against +3.70 (t = +1.61), maxDD
+  -6.22% against -8.35%. Still under Bonferroni for 26 trials (|t| ~ 3.2), and
+  R10 §5's cost finding applies unchanged. Config default stays
+  `require_retest: true`, which is what the report specifies.
+
+- **Position sizing was anti-correlated with the edge — this is why total
+  return stayed negative while per-trade expectancy was positive.**
+  `weight = risk_per_trade / (stop_sigmas * sigma_H)` gives a tight stop a large
+  position, so `corr(sigma, notional) = -0.897`. But the edge here grows with
+  volatility: lowest-vol quintile -1.44 bps at a 38% win rate, highest-vol
+  +7.45 bps at 51%. The strategy bet most on its worst trades. Equal-weighted
+  mean +1.25 bps against a notional-weighted **-0.83 bps** — that gap is the
+  entire discrepancy. Not a bug; the textbook rule, wrong for an edge that
+  scales with volatility.
+- With only the sizing changed, total return goes **-2.17% -> +4.56%**
+  (Sharpe +0.41, maxDD -8.00%, gross +4.27 bps at t = +1.85). Same entries,
+  exits and fills.
+- **The win rate was never the problem**: 45.5% against a 43.0% breakeven,
+  carried by a payoff ratio above 1.
+- **It still fails on honest costs.** Equal sizing raises the share of trades in
+  the first two bars from 49% to 58%, because it stops shrinking positions in
+  the volatile names the open produces. At measured spreads the variant runs
+  **-2.99 bps/trade**; the bar 0-1 bucket needs a half-spread under 2.25 bps
+  against 4.91 measured.
+
+### Validation
+
+- Execution audit on `m5_mine`: all five checks pass over 5,540 fills — open of
+  the next bar, prices inside `[low, high]`, spread always adverse, silent-bar
+  fills all declared stale exits, and 2,839 earlier fills unchanged when every
+  bar after 2024-08-13 was tripled.
+- 233 unit + integration tests pass. New: 9 for the setup gallery (including
+  both decision-bar lookups, which would silently draw nothing if read at the
+  fill), 8 for the level features
+  (availability, not just formulas), 11 for the strategy (including
+  prefix-invariance against lookahead, and one condition removed at a time), 10
+  for the Kronos harness against a stub predictor (including the window
+  boundary).
+
+### Not done, deliberately
+
+- **`m5_validate` was not touched.** Nothing is positive on the mining window,
+  so spending the confirmation window would burn a scarce resource to confirm an
+  already-negative in-sample result.
+- **The filter was not inverted**, though its negative IC means that would
+  improve the backtest. Choosing a sign by looking at the window that produced
+  it is data mining, at t = −1.35.
+- **No parameters were searched.** One clean test, not the best of many.
+- `m5_mine` has now carried 15 recorded trials; that burden attaches to anything
+  found on it later.
+
+## 2026-08-26 (S/R + Kronos conjunction: rejected on paper)
+
+### Findings
+
+- `docs/research/R08-kronos-conjunction.md` — proposal to confirm S/R entries
+  with the Kronos foundation model, rejected without implementation.
+  - **The conjunction fails on arithmetic before the model is reached.** R07
+    measured the S/R leg as independent of forward returns (0.0006 sigma vs
+    placebo, no |t| above 0.78), and for an `A` independent of `r`,
+    `E[r | A and B] = E[r | B]`. Filtering with a null signal leaves expectancy
+    per trade unchanged, shrinks the sample, and creates a selection that can
+    look better or worse by chance — the standard route into overfitting.
+  - Kronos alone fails gate §1 (no mechanism), §2 (public weights, public
+    architecture, free OHLCV inputs), §3 (unchanged — still a slow taker) and §4
+    (no stated edge magnitude; it outputs a price path, so converting it to a
+    position adds free parameters).
+  - The model's own README states it is "not a production-ready quantitative
+    trading system" and makes no profitability claims.
+  - §5 recorded with an honest qualification: Kronos is a different *function
+    class* from the hand-crafted linear signals tested so far, so the rule is
+    not a clean kill on its own. R05's shuffle test (real ordering produces
+    trends at 0.543x the shuffled rate) bounds how much nonlinear structure is
+    available, and any find must beat 2.4 bps per round trip when the strongest
+    measured effect in this universe does not.
+  - **Win-rate arithmetic added.** At a 12-bar hold the breakeven win rate here
+    is **53.4%** (56.4% at 3 bars, 52.5% at 24), so 51% loses money at every
+    horizon. The best signal found anywhere in this project — residual reversal,
+    rank IC +0.017 at t = +9.4 — implies a **52.4%** win rate and is *below*
+    breakeven. "Greater than 50%" claims something weaker than an already
+    rejected signal.
+  - **Filtering logic addressed.** "S/R false signals" presupposes true ones; a
+    null leg has no correct subset to recover. If `A` is independent of `r`,
+    `{A=1}` is a random subset and the conjunction is weakly worse than `B`
+    alone in both branches — fewer opportunities at the same rate if `B` works,
+    and no rescue if it does not.
+- Recorded in `results/search/ledger.jsonl` as rejected-before-implementation.
+
+## 2026-08-26 (S/R + order-flow report: assessed and rejected)
+
+### Findings
+
+- `docs/research/R07-sr-orderflow-report-assessment.md` — gate assessment of
+  `deep-research-report.md`, plus two pre-registered falsification tests.
+  - The report's strongest components (OFI, queue imbalance, absorption) are
+    **limit-order-book** results and are unconstructible here: IEX gives 2.1% of
+    AAPL's tape, no quotes, no book, and no way to sign a trade. The report says
+    as much itself.
+  - The implementable subset (ex-ante S/R, RVOL, VWAP state) fails the gate on
+    **§3 which side is paid** — stop cascades pay whoever provides liquidity into
+    them, not a taker arriving at the next bar's open — and on **§5 incremental
+    information**, being functions of past prices already rejected.
+  - **Round-number effect: absent.** Continuation after crossing $X.00 is
+    −0.0035 sigma against −0.0030 for placebo offsets $X.13/$X.37; difference
+    −0.0006 sigma, no |t| above 0.78 over 170,038 crossings. The report
+    explicitly asked for this to be re-estimated for equities rather than
+    transplanted from FX; it has been, and it is not there.
+  - **Previous-day high/low: absent.** PDH +0.0100, PDL +0.0188 sigma against
+    placebos at 37%/63% of the prior day's range spanning −0.0145 to +0.0128.
+    The placebo range fully brackets both, no |t| above 0.63.
+  - Since every rule in the state machine begins with "price approaches L", a
+    null at the trigger makes the rest untestable rather than merely
+    unpromising. **Verdict: do not implement.**
+- Both rejections recorded in `results/search/ledger.jsonl`.
+
 ## 2026-08-26 (what is left, and what would break through)
 
 ### Findings
@@ -59,6 +493,62 @@
 
 ## 2026-08-26 (do trends exist? shuffle test)
 
+- **`session_drift_zscore` measures position, not direction.** It is
+  `sum(r since the open)/(sigma*sqrt(n))`, so a large early move fixes its sign
+  for the rest of the session. Worked example (TSLA 2025-01-30, short at 10:25,
+  -324 bps): drift since the open -284 bps giving `momentum_z` -1.09, while the
+  last 6 bars were **+120 bps** and the session low was 25 minutes old. The
+  filter said "short" into a 25-minute rally.
+- **Fixing it makes the backtest worse**: gross/trade +3.50 (session) -> +2.98
+  (ewma span 12) -> +1.13 (ewma span 6). The reason is a direct slice: 19% of
+  entries are taken *against* the last six bars and those earn +6.58 bps against
+  +2.77 for the ones that agree. The stale indicator was accidentally producing
+  counter-trend entries, and on this universe fading beats following (R04/R05:
+  momentum rank IC -0.023, t = -11.2). Broken on mechanics, broken in the
+  profitable direction.
+- **Requiring Kronos agreement is worth +0.28 bps at t = +0.06** over all 2,750
+  scored trades (agreed 45.8% hit / +3.86 bps on 33% of the book; disagreed
+  45.2% / +3.58 bps). This is less damaging than R09's backtest, which showed
+  +3.50 -> +1.13: the two reconcile because vetoing frees position slots and the
+  replacement trades are worse. Most of R09's damage was that indirect effect,
+  not the filter's own selection.
+- **The higher-low structural objection is not distinguishable from noise.**
+  Trading against the session structure: -1.35 bps against +0.57 with it,
+  difference t = -0.37 on n = 903. Sharper on the short leg (-4.63 vs +5.31) but
+  on 121 trades, and the long leg flips sign — and it contradicts the "fights
+  the last six bars" slice on a larger sample.
+
+- **The late entry in the charted TSLA loser was caused by the blackout.**
+  Baseline entered 09:40 at 395.60 as price left the 400 level, before the fall
+  to 386. With `no_entry_before=10:20` the first admissible bar was 10:25, 25
+  minutes after the low, into the rally: -324 bps. The delay does not take the
+  same trade later, it takes the reversal.
+- **With the state machine corrected, entering on the break beats waiting for
+  the retest**: gross +4.25 bps (t = +1.84) against +3.70 (t = +1.61), maxDD
+  -6.22% against -8.35%. Still under Bonferroni for 26 trials (|t| ~ 3.2), and
+  R10 §5's cost finding applies unchanged. Config default stays
+  `require_retest: true`, which is what the report specifies.
+
+- **Position sizing was anti-correlated with the edge — this is why total
+  return stayed negative while per-trade expectancy was positive.**
+  `weight = risk_per_trade / (stop_sigmas * sigma_H)` gives a tight stop a large
+  position, so `corr(sigma, notional) = -0.897`. But the edge here grows with
+  volatility: lowest-vol quintile -1.44 bps at a 38% win rate, highest-vol
+  +7.45 bps at 51%. The strategy bet most on its worst trades. Equal-weighted
+  mean +1.25 bps against a notional-weighted **-0.83 bps** — that gap is the
+  entire discrepancy. Not a bug; the textbook rule, wrong for an edge that
+  scales with volatility.
+- With only the sizing changed, total return goes **-2.17% -> +4.56%**
+  (Sharpe +0.41, maxDD -8.00%, gross +4.27 bps at t = +1.85). Same entries,
+  exits and fills.
+- **The win rate was never the problem**: 45.5% against a 43.0% breakeven,
+  carried by a payoff ratio above 1.
+- **It still fails on honest costs.** Equal sizing raises the share of trades in
+  the first two bars from 49% to 58%, because it stops shrinking positions in
+  the volatile names the open produces. At measured spreads the variant runs
+  **-2.99 bps/trade**; the bar 0-1 bucket needs a half-spread under 2.25 bps
+  against 4.91 measured.
+
 ### Validation
 
 - `docs/research/R05-do-trends-exist.md` — tested the claim that sustained runs
@@ -106,6 +596,16 @@
 
 ### Fixed
 
+- **The retest was never filtering anything.** `_track_break` tested "price is
+  beyond a level" rather than "price was not already beyond it", so a break
+  re-registered every bar, resetting `broke_age` to 0 and clearing `retested`;
+  the same call then re-set it if that bar's range straddled the zone. 81.4% of
+  live breaks sat at age 0. "Break -> come back -> retest -> hold" was in
+  practice a single-bar test of "price is beyond the level and this bar
+  straddles it". A break now registers once and ages; age-0 share falls to
+  42.3%. Two regression tests pin it. Found because removing the retest
+  requirement altogether changed the trade count by 19 out of 2,788.
+
 - **Fills were possible on bars where nothing traded.** The engine gated new
   exposure on the liquidity mask at the *decision* bar while documenting that it
   gated on a print in the *execution* bar. The liquidity mask tolerates
@@ -118,6 +618,62 @@
   313.685 on 7,018). `drop_incomplete_bars` discards them at ingestion. The
   affected sessions were dropped and re-ingested. Found because the raw layer's
   immutability guard fired on a re-download — which is what that guard is for.
+
+- **`session_drift_zscore` measures position, not direction.** It is
+  `sum(r since the open)/(sigma*sqrt(n))`, so a large early move fixes its sign
+  for the rest of the session. Worked example (TSLA 2025-01-30, short at 10:25,
+  -324 bps): drift since the open -284 bps giving `momentum_z` -1.09, while the
+  last 6 bars were **+120 bps** and the session low was 25 minutes old. The
+  filter said "short" into a 25-minute rally.
+- **Fixing it makes the backtest worse**: gross/trade +3.50 (session) -> +2.98
+  (ewma span 12) -> +1.13 (ewma span 6). The reason is a direct slice: 19% of
+  entries are taken *against* the last six bars and those earn +6.58 bps against
+  +2.77 for the ones that agree. The stale indicator was accidentally producing
+  counter-trend entries, and on this universe fading beats following (R04/R05:
+  momentum rank IC -0.023, t = -11.2). Broken on mechanics, broken in the
+  profitable direction.
+- **Requiring Kronos agreement is worth +0.28 bps at t = +0.06** over all 2,750
+  scored trades (agreed 45.8% hit / +3.86 bps on 33% of the book; disagreed
+  45.2% / +3.58 bps). This is less damaging than R09's backtest, which showed
+  +3.50 -> +1.13: the two reconcile because vetoing frees position slots and the
+  replacement trades are worse. Most of R09's damage was that indirect effect,
+  not the filter's own selection.
+- **The higher-low structural objection is not distinguishable from noise.**
+  Trading against the session structure: -1.35 bps against +0.57 with it,
+  difference t = -0.37 on n = 903. Sharper on the short leg (-4.63 vs +5.31) but
+  on 121 trades, and the long leg flips sign — and it contradicts the "fights
+  the last six bars" slice on a larger sample.
+
+- **The late entry in the charted TSLA loser was caused by the blackout.**
+  Baseline entered 09:40 at 395.60 as price left the 400 level, before the fall
+  to 386. With `no_entry_before=10:20` the first admissible bar was 10:25, 25
+  minutes after the low, into the rally: -324 bps. The delay does not take the
+  same trade later, it takes the reversal.
+- **With the state machine corrected, entering on the break beats waiting for
+  the retest**: gross +4.25 bps (t = +1.84) against +3.70 (t = +1.61), maxDD
+  -6.22% against -8.35%. Still under Bonferroni for 26 trials (|t| ~ 3.2), and
+  R10 §5's cost finding applies unchanged. Config default stays
+  `require_retest: true`, which is what the report specifies.
+
+- **Position sizing was anti-correlated with the edge — this is why total
+  return stayed negative while per-trade expectancy was positive.**
+  `weight = risk_per_trade / (stop_sigmas * sigma_H)` gives a tight stop a large
+  position, so `corr(sigma, notional) = -0.897`. But the edge here grows with
+  volatility: lowest-vol quintile -1.44 bps at a 38% win rate, highest-vol
+  +7.45 bps at 51%. The strategy bet most on its worst trades. Equal-weighted
+  mean +1.25 bps against a notional-weighted **-0.83 bps** — that gap is the
+  entire discrepancy. Not a bug; the textbook rule, wrong for an edge that
+  scales with volatility.
+- With only the sizing changed, total return goes **-2.17% -> +4.56%**
+  (Sharpe +0.41, maxDD -8.00%, gross +4.27 bps at t = +1.85). Same entries,
+  exits and fills.
+- **The win rate was never the problem**: 45.5% against a 43.0% breakeven,
+  carried by a payoff ratio above 1.
+- **It still fails on honest costs.** Equal sizing raises the share of trades in
+  the first two bars from 49% to 58%, because it stops shrinking positions in
+  the volatile names the open produces. At measured spreads the variant runs
+  **-2.99 bps/trade**; the bar 0-1 bucket needs a half-spread under 2.25 bps
+  against 4.91 measured.
 
 ### Validation
 
@@ -149,6 +705,16 @@
 
 ### Fixed
 
+- **The retest was never filtering anything.** `_track_break` tested "price is
+  beyond a level" rather than "price was not already beyond it", so a break
+  re-registered every bar, resetting `broke_age` to 0 and clearing `retested`;
+  the same call then re-set it if that bar's range straddled the zone. 81.4% of
+  live breaks sat at age 0. "Break -> come back -> retest -> hold" was in
+  practice a single-bar test of "price is beyond the level and this bar
+  straddles it". A break now registers once and ages; age-0 share falls to
+  42.3%. Two regression tests pin it. Found because removing the retest
+  requirement altogether changed the trade count by 19 out of 2,788.
+
 - **A flat sigma understated opening volatility by three to four times.** Pooled
   over 22 names and 142 sessions, the per-minute standard deviation runs 4.11x
   the session mean at minute 1, 2.62x at minute 5, 2.12x at minute 15 and 0.75x
@@ -162,6 +728,62 @@
   the intended use. Regression test added.
 - `scripts/analyze_episodes.py` no longer forces `--split mine`; omitting it
   uses the config's own date range.
+
+- **`session_drift_zscore` measures position, not direction.** It is
+  `sum(r since the open)/(sigma*sqrt(n))`, so a large early move fixes its sign
+  for the rest of the session. Worked example (TSLA 2025-01-30, short at 10:25,
+  -324 bps): drift since the open -284 bps giving `momentum_z` -1.09, while the
+  last 6 bars were **+120 bps** and the session low was 25 minutes old. The
+  filter said "short" into a 25-minute rally.
+- **Fixing it makes the backtest worse**: gross/trade +3.50 (session) -> +2.98
+  (ewma span 12) -> +1.13 (ewma span 6). The reason is a direct slice: 19% of
+  entries are taken *against* the last six bars and those earn +6.58 bps against
+  +2.77 for the ones that agree. The stale indicator was accidentally producing
+  counter-trend entries, and on this universe fading beats following (R04/R05:
+  momentum rank IC -0.023, t = -11.2). Broken on mechanics, broken in the
+  profitable direction.
+- **Requiring Kronos agreement is worth +0.28 bps at t = +0.06** over all 2,750
+  scored trades (agreed 45.8% hit / +3.86 bps on 33% of the book; disagreed
+  45.2% / +3.58 bps). This is less damaging than R09's backtest, which showed
+  +3.50 -> +1.13: the two reconcile because vetoing frees position slots and the
+  replacement trades are worse. Most of R09's damage was that indirect effect,
+  not the filter's own selection.
+- **The higher-low structural objection is not distinguishable from noise.**
+  Trading against the session structure: -1.35 bps against +0.57 with it,
+  difference t = -0.37 on n = 903. Sharper on the short leg (-4.63 vs +5.31) but
+  on 121 trades, and the long leg flips sign — and it contradicts the "fights
+  the last six bars" slice on a larger sample.
+
+- **The late entry in the charted TSLA loser was caused by the blackout.**
+  Baseline entered 09:40 at 395.60 as price left the 400 level, before the fall
+  to 386. With `no_entry_before=10:20` the first admissible bar was 10:25, 25
+  minutes after the low, into the rally: -324 bps. The delay does not take the
+  same trade later, it takes the reversal.
+- **With the state machine corrected, entering on the break beats waiting for
+  the retest**: gross +4.25 bps (t = +1.84) against +3.70 (t = +1.61), maxDD
+  -6.22% against -8.35%. Still under Bonferroni for 26 trials (|t| ~ 3.2), and
+  R10 §5's cost finding applies unchanged. Config default stays
+  `require_retest: true`, which is what the report specifies.
+
+- **Position sizing was anti-correlated with the edge — this is why total
+  return stayed negative while per-trade expectancy was positive.**
+  `weight = risk_per_trade / (stop_sigmas * sigma_H)` gives a tight stop a large
+  position, so `corr(sigma, notional) = -0.897`. But the edge here grows with
+  volatility: lowest-vol quintile -1.44 bps at a 38% win rate, highest-vol
+  +7.45 bps at 51%. The strategy bet most on its worst trades. Equal-weighted
+  mean +1.25 bps against a notional-weighted **-0.83 bps** — that gap is the
+  entire discrepancy. Not a bug; the textbook rule, wrong for an edge that
+  scales with volatility.
+- With only the sizing changed, total return goes **-2.17% -> +4.56%**
+  (Sharpe +0.41, maxDD -8.00%, gross +4.27 bps at t = +1.85). Same entries,
+  exits and fills.
+- **The win rate was never the problem**: 45.5% against a 43.0% breakeven,
+  carried by a payoff ratio above 1.
+- **It still fails on honest costs.** Equal sizing raises the share of trades in
+  the first two bars from 49% to 58%, because it stops shrinking positions in
+  the volatile names the open produces. At measured spreads the variant runs
+  **-2.99 bps/trade**; the bar 0-1 bucket needs a half-spread under 2.25 bps
+  against 4.91 measured.
 
 ### Validation
 
@@ -181,6 +803,62 @@
 - `TrendRatchetStrategy.session_confirm_z` — gate a fast trigger on the day's
   own drift, so an entry can happen early in a move while still requiring the
   session to be trending in that direction. Off by default.
+
+- **`session_drift_zscore` measures position, not direction.** It is
+  `sum(r since the open)/(sigma*sqrt(n))`, so a large early move fixes its sign
+  for the rest of the session. Worked example (TSLA 2025-01-30, short at 10:25,
+  -324 bps): drift since the open -284 bps giving `momentum_z` -1.09, while the
+  last 6 bars were **+120 bps** and the session low was 25 minutes old. The
+  filter said "short" into a 25-minute rally.
+- **Fixing it makes the backtest worse**: gross/trade +3.50 (session) -> +2.98
+  (ewma span 12) -> +1.13 (ewma span 6). The reason is a direct slice: 19% of
+  entries are taken *against* the last six bars and those earn +6.58 bps against
+  +2.77 for the ones that agree. The stale indicator was accidentally producing
+  counter-trend entries, and on this universe fading beats following (R04/R05:
+  momentum rank IC -0.023, t = -11.2). Broken on mechanics, broken in the
+  profitable direction.
+- **Requiring Kronos agreement is worth +0.28 bps at t = +0.06** over all 2,750
+  scored trades (agreed 45.8% hit / +3.86 bps on 33% of the book; disagreed
+  45.2% / +3.58 bps). This is less damaging than R09's backtest, which showed
+  +3.50 -> +1.13: the two reconcile because vetoing frees position slots and the
+  replacement trades are worse. Most of R09's damage was that indirect effect,
+  not the filter's own selection.
+- **The higher-low structural objection is not distinguishable from noise.**
+  Trading against the session structure: -1.35 bps against +0.57 with it,
+  difference t = -0.37 on n = 903. Sharper on the short leg (-4.63 vs +5.31) but
+  on 121 trades, and the long leg flips sign — and it contradicts the "fights
+  the last six bars" slice on a larger sample.
+
+- **The late entry in the charted TSLA loser was caused by the blackout.**
+  Baseline entered 09:40 at 395.60 as price left the 400 level, before the fall
+  to 386. With `no_entry_before=10:20` the first admissible bar was 10:25, 25
+  minutes after the low, into the rally: -324 bps. The delay does not take the
+  same trade later, it takes the reversal.
+- **With the state machine corrected, entering on the break beats waiting for
+  the retest**: gross +4.25 bps (t = +1.84) against +3.70 (t = +1.61), maxDD
+  -6.22% against -8.35%. Still under Bonferroni for 26 trials (|t| ~ 3.2), and
+  R10 §5's cost finding applies unchanged. Config default stays
+  `require_retest: true`, which is what the report specifies.
+
+- **Position sizing was anti-correlated with the edge — this is why total
+  return stayed negative while per-trade expectancy was positive.**
+  `weight = risk_per_trade / (stop_sigmas * sigma_H)` gives a tight stop a large
+  position, so `corr(sigma, notional) = -0.897`. But the edge here grows with
+  volatility: lowest-vol quintile -1.44 bps at a 38% win rate, highest-vol
+  +7.45 bps at 51%. The strategy bet most on its worst trades. Equal-weighted
+  mean +1.25 bps against a notional-weighted **-0.83 bps** — that gap is the
+  entire discrepancy. Not a bug; the textbook rule, wrong for an edge that
+  scales with volatility.
+- With only the sizing changed, total return goes **-2.17% -> +4.56%**
+  (Sharpe +0.41, maxDD -8.00%, gross +4.27 bps at t = +1.85). Same entries,
+  exits and fills.
+- **The win rate was never the problem**: 45.5% against a 43.0% breakeven,
+  carried by a payoff ratio above 1.
+- **It still fails on honest costs.** Equal sizing raises the share of trades in
+  the first two bars from 49% to 58%, because it stops shrinking positions in
+  the volatile names the open produces. At measured spreads the variant runs
+  **-2.99 bps/trade**; the bar 0-1 bucket needs a half-spread under 2.25 bps
+  against 4.91 measured.
 
 ### Validation
 
@@ -221,6 +899,62 @@
 - Removed `allow_continuation` / `allow_reversal`: they were modes of the
   crossing trigger and have no meaning for a state entry.
 
+- **`session_drift_zscore` measures position, not direction.** It is
+  `sum(r since the open)/(sigma*sqrt(n))`, so a large early move fixes its sign
+  for the rest of the session. Worked example (TSLA 2025-01-30, short at 10:25,
+  -324 bps): drift since the open -284 bps giving `momentum_z` -1.09, while the
+  last 6 bars were **+120 bps** and the session low was 25 minutes old. The
+  filter said "short" into a 25-minute rally.
+- **Fixing it makes the backtest worse**: gross/trade +3.50 (session) -> +2.98
+  (ewma span 12) -> +1.13 (ewma span 6). The reason is a direct slice: 19% of
+  entries are taken *against* the last six bars and those earn +6.58 bps against
+  +2.77 for the ones that agree. The stale indicator was accidentally producing
+  counter-trend entries, and on this universe fading beats following (R04/R05:
+  momentum rank IC -0.023, t = -11.2). Broken on mechanics, broken in the
+  profitable direction.
+- **Requiring Kronos agreement is worth +0.28 bps at t = +0.06** over all 2,750
+  scored trades (agreed 45.8% hit / +3.86 bps on 33% of the book; disagreed
+  45.2% / +3.58 bps). This is less damaging than R09's backtest, which showed
+  +3.50 -> +1.13: the two reconcile because vetoing frees position slots and the
+  replacement trades are worse. Most of R09's damage was that indirect effect,
+  not the filter's own selection.
+- **The higher-low structural objection is not distinguishable from noise.**
+  Trading against the session structure: -1.35 bps against +0.57 with it,
+  difference t = -0.37 on n = 903. Sharper on the short leg (-4.63 vs +5.31) but
+  on 121 trades, and the long leg flips sign — and it contradicts the "fights
+  the last six bars" slice on a larger sample.
+
+- **The late entry in the charted TSLA loser was caused by the blackout.**
+  Baseline entered 09:40 at 395.60 as price left the 400 level, before the fall
+  to 386. With `no_entry_before=10:20` the first admissible bar was 10:25, 25
+  minutes after the low, into the rally: -324 bps. The delay does not take the
+  same trade later, it takes the reversal.
+- **With the state machine corrected, entering on the break beats waiting for
+  the retest**: gross +4.25 bps (t = +1.84) against +3.70 (t = +1.61), maxDD
+  -6.22% against -8.35%. Still under Bonferroni for 26 trials (|t| ~ 3.2), and
+  R10 §5's cost finding applies unchanged. Config default stays
+  `require_retest: true`, which is what the report specifies.
+
+- **Position sizing was anti-correlated with the edge — this is why total
+  return stayed negative while per-trade expectancy was positive.**
+  `weight = risk_per_trade / (stop_sigmas * sigma_H)` gives a tight stop a large
+  position, so `corr(sigma, notional) = -0.897`. But the edge here grows with
+  volatility: lowest-vol quintile -1.44 bps at a 38% win rate, highest-vol
+  +7.45 bps at 51%. The strategy bet most on its worst trades. Equal-weighted
+  mean +1.25 bps against a notional-weighted **-0.83 bps** — that gap is the
+  entire discrepancy. Not a bug; the textbook rule, wrong for an edge that
+  scales with volatility.
+- With only the sizing changed, total return goes **-2.17% -> +4.56%**
+  (Sharpe +0.41, maxDD -8.00%, gross +4.27 bps at t = +1.85). Same entries,
+  exits and fills.
+- **The win rate was never the problem**: 45.5% against a 43.0% breakeven,
+  carried by a payoff ratio above 1.
+- **It still fails on honest costs.** Equal sizing raises the share of trades in
+  the first two bars from 49% to 58%, because it stops shrinking positions in
+  the volatile names the open produces. At measured spreads the variant runs
+  **-2.99 bps/trade**; the bar 0-1 bucket needs a half-spread under 2.25 bps
+  against 4.91 measured.
+
 ### Validation
 
 - `pytest` — 172 passed. New tests: a sustained trend is entered without waiting
@@ -251,6 +985,62 @@
   opinion during the whole session, the open included, and the two gates are
   what hold the frequency down. On `mine` this pair takes **0.8 trades a day**
   per 22 names against 3.0 for the ungated window estimator.
+
+- **`session_drift_zscore` measures position, not direction.** It is
+  `sum(r since the open)/(sigma*sqrt(n))`, so a large early move fixes its sign
+  for the rest of the session. Worked example (TSLA 2025-01-30, short at 10:25,
+  -324 bps): drift since the open -284 bps giving `momentum_z` -1.09, while the
+  last 6 bars were **+120 bps** and the session low was 25 minutes old. The
+  filter said "short" into a 25-minute rally.
+- **Fixing it makes the backtest worse**: gross/trade +3.50 (session) -> +2.98
+  (ewma span 12) -> +1.13 (ewma span 6). The reason is a direct slice: 19% of
+  entries are taken *against* the last six bars and those earn +6.58 bps against
+  +2.77 for the ones that agree. The stale indicator was accidentally producing
+  counter-trend entries, and on this universe fading beats following (R04/R05:
+  momentum rank IC -0.023, t = -11.2). Broken on mechanics, broken in the
+  profitable direction.
+- **Requiring Kronos agreement is worth +0.28 bps at t = +0.06** over all 2,750
+  scored trades (agreed 45.8% hit / +3.86 bps on 33% of the book; disagreed
+  45.2% / +3.58 bps). This is less damaging than R09's backtest, which showed
+  +3.50 -> +1.13: the two reconcile because vetoing frees position slots and the
+  replacement trades are worse. Most of R09's damage was that indirect effect,
+  not the filter's own selection.
+- **The higher-low structural objection is not distinguishable from noise.**
+  Trading against the session structure: -1.35 bps against +0.57 with it,
+  difference t = -0.37 on n = 903. Sharper on the short leg (-4.63 vs +5.31) but
+  on 121 trades, and the long leg flips sign — and it contradicts the "fights
+  the last six bars" slice on a larger sample.
+
+- **The late entry in the charted TSLA loser was caused by the blackout.**
+  Baseline entered 09:40 at 395.60 as price left the 400 level, before the fall
+  to 386. With `no_entry_before=10:20` the first admissible bar was 10:25, 25
+  minutes after the low, into the rally: -324 bps. The delay does not take the
+  same trade later, it takes the reversal.
+- **With the state machine corrected, entering on the break beats waiting for
+  the retest**: gross +4.25 bps (t = +1.84) against +3.70 (t = +1.61), maxDD
+  -6.22% against -8.35%. Still under Bonferroni for 26 trials (|t| ~ 3.2), and
+  R10 §5's cost finding applies unchanged. Config default stays
+  `require_retest: true`, which is what the report specifies.
+
+- **Position sizing was anti-correlated with the edge — this is why total
+  return stayed negative while per-trade expectancy was positive.**
+  `weight = risk_per_trade / (stop_sigmas * sigma_H)` gives a tight stop a large
+  position, so `corr(sigma, notional) = -0.897`. But the edge here grows with
+  volatility: lowest-vol quintile -1.44 bps at a 38% win rate, highest-vol
+  +7.45 bps at 51%. The strategy bet most on its worst trades. Equal-weighted
+  mean +1.25 bps against a notional-weighted **-0.83 bps** — that gap is the
+  entire discrepancy. Not a bug; the textbook rule, wrong for an edge that
+  scales with volatility.
+- With only the sizing changed, total return goes **-2.17% -> +4.56%**
+  (Sharpe +0.41, maxDD -8.00%, gross +4.27 bps at t = +1.85). Same entries,
+  exits and fills.
+- **The win rate was never the problem**: 45.5% against a 43.0% breakeven,
+  carried by a payoff ratio above 1.
+- **It still fails on honest costs.** Equal sizing raises the share of trades in
+  the first two bars from 49% to 58%, because it stops shrinking positions in
+  the volatile names the open produces. At measured spreads the variant runs
+  **-2.99 bps/trade**; the bar 0-1 bucket needs a half-spread under 2.25 bps
+  against 4.91 measured.
 
 ### Validation
 
@@ -303,6 +1093,62 @@
 - `trend_estimator` defaults to `window` and `min_cross_zscore` to 0 (off).
   Both defaults rest on a cost argument, not a performance search: see below.
 
+- **`session_drift_zscore` measures position, not direction.** It is
+  `sum(r since the open)/(sigma*sqrt(n))`, so a large early move fixes its sign
+  for the rest of the session. Worked example (TSLA 2025-01-30, short at 10:25,
+  -324 bps): drift since the open -284 bps giving `momentum_z` -1.09, while the
+  last 6 bars were **+120 bps** and the session low was 25 minutes old. The
+  filter said "short" into a 25-minute rally.
+- **Fixing it makes the backtest worse**: gross/trade +3.50 (session) -> +2.98
+  (ewma span 12) -> +1.13 (ewma span 6). The reason is a direct slice: 19% of
+  entries are taken *against* the last six bars and those earn +6.58 bps against
+  +2.77 for the ones that agree. The stale indicator was accidentally producing
+  counter-trend entries, and on this universe fading beats following (R04/R05:
+  momentum rank IC -0.023, t = -11.2). Broken on mechanics, broken in the
+  profitable direction.
+- **Requiring Kronos agreement is worth +0.28 bps at t = +0.06** over all 2,750
+  scored trades (agreed 45.8% hit / +3.86 bps on 33% of the book; disagreed
+  45.2% / +3.58 bps). This is less damaging than R09's backtest, which showed
+  +3.50 -> +1.13: the two reconcile because vetoing frees position slots and the
+  replacement trades are worse. Most of R09's damage was that indirect effect,
+  not the filter's own selection.
+- **The higher-low structural objection is not distinguishable from noise.**
+  Trading against the session structure: -1.35 bps against +0.57 with it,
+  difference t = -0.37 on n = 903. Sharper on the short leg (-4.63 vs +5.31) but
+  on 121 trades, and the long leg flips sign — and it contradicts the "fights
+  the last six bars" slice on a larger sample.
+
+- **The late entry in the charted TSLA loser was caused by the blackout.**
+  Baseline entered 09:40 at 395.60 as price left the 400 level, before the fall
+  to 386. With `no_entry_before=10:20` the first admissible bar was 10:25, 25
+  minutes after the low, into the rally: -324 bps. The delay does not take the
+  same trade later, it takes the reversal.
+- **With the state machine corrected, entering on the break beats waiting for
+  the retest**: gross +4.25 bps (t = +1.84) against +3.70 (t = +1.61), maxDD
+  -6.22% against -8.35%. Still under Bonferroni for 26 trials (|t| ~ 3.2), and
+  R10 §5's cost finding applies unchanged. Config default stays
+  `require_retest: true`, which is what the report specifies.
+
+- **Position sizing was anti-correlated with the edge — this is why total
+  return stayed negative while per-trade expectancy was positive.**
+  `weight = risk_per_trade / (stop_sigmas * sigma_H)` gives a tight stop a large
+  position, so `corr(sigma, notional) = -0.897`. But the edge here grows with
+  volatility: lowest-vol quintile -1.44 bps at a 38% win rate, highest-vol
+  +7.45 bps at 51%. The strategy bet most on its worst trades. Equal-weighted
+  mean +1.25 bps against a notional-weighted **-0.83 bps** — that gap is the
+  entire discrepancy. Not a bug; the textbook rule, wrong for an edge that
+  scales with volatility.
+- With only the sizing changed, total return goes **-2.17% -> +4.56%**
+  (Sharpe +0.41, maxDD -8.00%, gross +4.27 bps at t = +1.85). Same entries,
+  exits and fills.
+- **The win rate was never the problem**: 45.5% against a 43.0% breakeven,
+  carried by a payoff ratio above 1.
+- **It still fails on honest costs.** Equal sizing raises the share of trades in
+  the first two bars from 49% to 58%, because it stops shrinking positions in
+  the volatile names the open produces. At measured spreads the variant runs
+  **-2.99 bps/trade**; the bar 0-1 bucket needs a half-spread under 2.25 bps
+  against 4.91 measured.
+
 ### Validation
 
 - `pytest` — 168 passed, including simulation checks that both new statistics
@@ -353,6 +1199,62 @@
   `macd_hist`; it already computed them, and the two lines are what a reader
   needs to see why a cross happened.
 
+- **`session_drift_zscore` measures position, not direction.** It is
+  `sum(r since the open)/(sigma*sqrt(n))`, so a large early move fixes its sign
+  for the rest of the session. Worked example (TSLA 2025-01-30, short at 10:25,
+  -324 bps): drift since the open -284 bps giving `momentum_z` -1.09, while the
+  last 6 bars were **+120 bps** and the session low was 25 minutes old. The
+  filter said "short" into a 25-minute rally.
+- **Fixing it makes the backtest worse**: gross/trade +3.50 (session) -> +2.98
+  (ewma span 12) -> +1.13 (ewma span 6). The reason is a direct slice: 19% of
+  entries are taken *against* the last six bars and those earn +6.58 bps against
+  +2.77 for the ones that agree. The stale indicator was accidentally producing
+  counter-trend entries, and on this universe fading beats following (R04/R05:
+  momentum rank IC -0.023, t = -11.2). Broken on mechanics, broken in the
+  profitable direction.
+- **Requiring Kronos agreement is worth +0.28 bps at t = +0.06** over all 2,750
+  scored trades (agreed 45.8% hit / +3.86 bps on 33% of the book; disagreed
+  45.2% / +3.58 bps). This is less damaging than R09's backtest, which showed
+  +3.50 -> +1.13: the two reconcile because vetoing frees position slots and the
+  replacement trades are worse. Most of R09's damage was that indirect effect,
+  not the filter's own selection.
+- **The higher-low structural objection is not distinguishable from noise.**
+  Trading against the session structure: -1.35 bps against +0.57 with it,
+  difference t = -0.37 on n = 903. Sharper on the short leg (-4.63 vs +5.31) but
+  on 121 trades, and the long leg flips sign — and it contradicts the "fights
+  the last six bars" slice on a larger sample.
+
+- **The late entry in the charted TSLA loser was caused by the blackout.**
+  Baseline entered 09:40 at 395.60 as price left the 400 level, before the fall
+  to 386. With `no_entry_before=10:20` the first admissible bar was 10:25, 25
+  minutes after the low, into the rally: -324 bps. The delay does not take the
+  same trade later, it takes the reversal.
+- **With the state machine corrected, entering on the break beats waiting for
+  the retest**: gross +4.25 bps (t = +1.84) against +3.70 (t = +1.61), maxDD
+  -6.22% against -8.35%. Still under Bonferroni for 26 trials (|t| ~ 3.2), and
+  R10 §5's cost finding applies unchanged. Config default stays
+  `require_retest: true`, which is what the report specifies.
+
+- **Position sizing was anti-correlated with the edge — this is why total
+  return stayed negative while per-trade expectancy was positive.**
+  `weight = risk_per_trade / (stop_sigmas * sigma_H)` gives a tight stop a large
+  position, so `corr(sigma, notional) = -0.897`. But the edge here grows with
+  volatility: lowest-vol quintile -1.44 bps at a 38% win rate, highest-vol
+  +7.45 bps at 51%. The strategy bet most on its worst trades. Equal-weighted
+  mean +1.25 bps against a notional-weighted **-0.83 bps** — that gap is the
+  entire discrepancy. Not a bug; the textbook rule, wrong for an edge that
+  scales with volatility.
+- With only the sizing changed, total return goes **-2.17% -> +4.56%**
+  (Sharpe +0.41, maxDD -8.00%, gross +4.27 bps at t = +1.85). Same entries,
+  exits and fills.
+- **The win rate was never the problem**: 45.5% against a 43.0% breakeven,
+  carried by a payoff ratio above 1.
+- **It still fails on honest costs.** Equal sizing raises the share of trades in
+  the first two bars from 49% to 58%, because it stops shrinking positions in
+  the volatile names the open produces. At measured spreads the variant runs
+  **-2.99 bps/trade**; the bar 0-1 bucket needs a half-spread under 2.25 bps
+  against 4.91 measured.
+
 ### Validation
 
 - `pytest` — 150 passed, including: every chart has a MACD panel even for a
@@ -395,6 +1297,16 @@
 
 ### Fixed
 
+- **The retest was never filtering anything.** `_track_break` tested "price is
+  beyond a level" rather than "price was not already beyond it", so a break
+  re-registered every bar, resetting `broke_age` to 0 and clearing `retested`;
+  the same call then re-set it if that bar's range straddled the zone. 81.4% of
+  live breaks sat at age 0. "Break -> come back -> retest -> hold" was in
+  practice a single-bar test of "price is beyond the level and this bar
+  straddles it". A break now registers once and ages; age-0 share falls to
+  42.3%. Two regression tests pin it. Found because removing the retest
+  requirement altogether changed the trade count by 19 out of 2,788.
+
 - The first draft used the regression's own t-statistic as the trend filter. Its
   standard error assumes independent residuals, which prices violate: on a
   driftless random walk it exceeds 2 about **80%** of the time, so the filter
@@ -402,6 +1314,62 @@
   Replaced with the correctly scaled `drift_zscore`.
 - The price chart's lower panel assumed a strategy exposing `macd_hist` also
   exposed `macd` and `macd_signal`, and raised `KeyError` otherwise.
+
+- **`session_drift_zscore` measures position, not direction.** It is
+  `sum(r since the open)/(sigma*sqrt(n))`, so a large early move fixes its sign
+  for the rest of the session. Worked example (TSLA 2025-01-30, short at 10:25,
+  -324 bps): drift since the open -284 bps giving `momentum_z` -1.09, while the
+  last 6 bars were **+120 bps** and the session low was 25 minutes old. The
+  filter said "short" into a 25-minute rally.
+- **Fixing it makes the backtest worse**: gross/trade +3.50 (session) -> +2.98
+  (ewma span 12) -> +1.13 (ewma span 6). The reason is a direct slice: 19% of
+  entries are taken *against* the last six bars and those earn +6.58 bps against
+  +2.77 for the ones that agree. The stale indicator was accidentally producing
+  counter-trend entries, and on this universe fading beats following (R04/R05:
+  momentum rank IC -0.023, t = -11.2). Broken on mechanics, broken in the
+  profitable direction.
+- **Requiring Kronos agreement is worth +0.28 bps at t = +0.06** over all 2,750
+  scored trades (agreed 45.8% hit / +3.86 bps on 33% of the book; disagreed
+  45.2% / +3.58 bps). This is less damaging than R09's backtest, which showed
+  +3.50 -> +1.13: the two reconcile because vetoing frees position slots and the
+  replacement trades are worse. Most of R09's damage was that indirect effect,
+  not the filter's own selection.
+- **The higher-low structural objection is not distinguishable from noise.**
+  Trading against the session structure: -1.35 bps against +0.57 with it,
+  difference t = -0.37 on n = 903. Sharper on the short leg (-4.63 vs +5.31) but
+  on 121 trades, and the long leg flips sign — and it contradicts the "fights
+  the last six bars" slice on a larger sample.
+
+- **The late entry in the charted TSLA loser was caused by the blackout.**
+  Baseline entered 09:40 at 395.60 as price left the 400 level, before the fall
+  to 386. With `no_entry_before=10:20` the first admissible bar was 10:25, 25
+  minutes after the low, into the rally: -324 bps. The delay does not take the
+  same trade later, it takes the reversal.
+- **With the state machine corrected, entering on the break beats waiting for
+  the retest**: gross +4.25 bps (t = +1.84) against +3.70 (t = +1.61), maxDD
+  -6.22% against -8.35%. Still under Bonferroni for 26 trials (|t| ~ 3.2), and
+  R10 §5's cost finding applies unchanged. Config default stays
+  `require_retest: true`, which is what the report specifies.
+
+- **Position sizing was anti-correlated with the edge — this is why total
+  return stayed negative while per-trade expectancy was positive.**
+  `weight = risk_per_trade / (stop_sigmas * sigma_H)` gives a tight stop a large
+  position, so `corr(sigma, notional) = -0.897`. But the edge here grows with
+  volatility: lowest-vol quintile -1.44 bps at a 38% win rate, highest-vol
+  +7.45 bps at 51%. The strategy bet most on its worst trades. Equal-weighted
+  mean +1.25 bps against a notional-weighted **-0.83 bps** — that gap is the
+  entire discrepancy. Not a bug; the textbook rule, wrong for an edge that
+  scales with volatility.
+- With only the sizing changed, total return goes **-2.17% -> +4.56%**
+  (Sharpe +0.41, maxDD -8.00%, gross +4.27 bps at t = +1.85). Same entries,
+  exits and fills.
+- **The win rate was never the problem**: 45.5% against a 43.0% breakeven,
+  carried by a payoff ratio above 1.
+- **It still fails on honest costs.** Equal sizing raises the share of trades in
+  the first two bars from 49% to 58%, because it stops shrinking positions in
+  the volatile names the open produces. At measured spreads the variant runs
+  **-2.99 bps/trade**; the bar 0-1 bucket needs a half-spread under 2.25 bps
+  against 4.91 measured.
 
 ### Validation
 
@@ -447,6 +1415,62 @@
 - Episode K-line windows now carry every indicator the strategy produced, not
   just `score`.
 - `scripts/analyze_episodes.py` is a thin CLI over `diagnose`.
+
+- **`session_drift_zscore` measures position, not direction.** It is
+  `sum(r since the open)/(sigma*sqrt(n))`, so a large early move fixes its sign
+  for the rest of the session. Worked example (TSLA 2025-01-30, short at 10:25,
+  -324 bps): drift since the open -284 bps giving `momentum_z` -1.09, while the
+  last 6 bars were **+120 bps** and the session low was 25 minutes old. The
+  filter said "short" into a 25-minute rally.
+- **Fixing it makes the backtest worse**: gross/trade +3.50 (session) -> +2.98
+  (ewma span 12) -> +1.13 (ewma span 6). The reason is a direct slice: 19% of
+  entries are taken *against* the last six bars and those earn +6.58 bps against
+  +2.77 for the ones that agree. The stale indicator was accidentally producing
+  counter-trend entries, and on this universe fading beats following (R04/R05:
+  momentum rank IC -0.023, t = -11.2). Broken on mechanics, broken in the
+  profitable direction.
+- **Requiring Kronos agreement is worth +0.28 bps at t = +0.06** over all 2,750
+  scored trades (agreed 45.8% hit / +3.86 bps on 33% of the book; disagreed
+  45.2% / +3.58 bps). This is less damaging than R09's backtest, which showed
+  +3.50 -> +1.13: the two reconcile because vetoing frees position slots and the
+  replacement trades are worse. Most of R09's damage was that indirect effect,
+  not the filter's own selection.
+- **The higher-low structural objection is not distinguishable from noise.**
+  Trading against the session structure: -1.35 bps against +0.57 with it,
+  difference t = -0.37 on n = 903. Sharper on the short leg (-4.63 vs +5.31) but
+  on 121 trades, and the long leg flips sign — and it contradicts the "fights
+  the last six bars" slice on a larger sample.
+
+- **The late entry in the charted TSLA loser was caused by the blackout.**
+  Baseline entered 09:40 at 395.60 as price left the 400 level, before the fall
+  to 386. With `no_entry_before=10:20` the first admissible bar was 10:25, 25
+  minutes after the low, into the rally: -324 bps. The delay does not take the
+  same trade later, it takes the reversal.
+- **With the state machine corrected, entering on the break beats waiting for
+  the retest**: gross +4.25 bps (t = +1.84) against +3.70 (t = +1.61), maxDD
+  -6.22% against -8.35%. Still under Bonferroni for 26 trials (|t| ~ 3.2), and
+  R10 §5's cost finding applies unchanged. Config default stays
+  `require_retest: true`, which is what the report specifies.
+
+- **Position sizing was anti-correlated with the edge — this is why total
+  return stayed negative while per-trade expectancy was positive.**
+  `weight = risk_per_trade / (stop_sigmas * sigma_H)` gives a tight stop a large
+  position, so `corr(sigma, notional) = -0.897`. But the edge here grows with
+  volatility: lowest-vol quintile -1.44 bps at a 38% win rate, highest-vol
+  +7.45 bps at 51%. The strategy bet most on its worst trades. Equal-weighted
+  mean +1.25 bps against a notional-weighted **-0.83 bps** — that gap is the
+  entire discrepancy. Not a bug; the textbook rule, wrong for an edge that
+  scales with volatility.
+- With only the sizing changed, total return goes **-2.17% -> +4.56%**
+  (Sharpe +0.41, maxDD -8.00%, gross +4.27 bps at t = +1.85). Same entries,
+  exits and fills.
+- **The win rate was never the problem**: 45.5% against a 43.0% breakeven,
+  carried by a payoff ratio above 1.
+- **It still fails on honest costs.** Equal sizing raises the share of trades in
+  the first two bars from 49% to 58%, because it stops shrinking positions in
+  the volatile names the open produces. At measured spreads the variant runs
+  **-2.99 bps/trade**; the bar 0-1 bucket needs a half-spread under 2.25 bps
+  against 4.91 measured.
 
 ### Validation
 
@@ -495,6 +1519,62 @@
   and episode tests share one synthetic store.
 - `viz.report._CSS` is now the public `REPORT_CSS`, shared with the episode
   report.
+
+- **`session_drift_zscore` measures position, not direction.** It is
+  `sum(r since the open)/(sigma*sqrt(n))`, so a large early move fixes its sign
+  for the rest of the session. Worked example (TSLA 2025-01-30, short at 10:25,
+  -324 bps): drift since the open -284 bps giving `momentum_z` -1.09, while the
+  last 6 bars were **+120 bps** and the session low was 25 minutes old. The
+  filter said "short" into a 25-minute rally.
+- **Fixing it makes the backtest worse**: gross/trade +3.50 (session) -> +2.98
+  (ewma span 12) -> +1.13 (ewma span 6). The reason is a direct slice: 19% of
+  entries are taken *against* the last six bars and those earn +6.58 bps against
+  +2.77 for the ones that agree. The stale indicator was accidentally producing
+  counter-trend entries, and on this universe fading beats following (R04/R05:
+  momentum rank IC -0.023, t = -11.2). Broken on mechanics, broken in the
+  profitable direction.
+- **Requiring Kronos agreement is worth +0.28 bps at t = +0.06** over all 2,750
+  scored trades (agreed 45.8% hit / +3.86 bps on 33% of the book; disagreed
+  45.2% / +3.58 bps). This is less damaging than R09's backtest, which showed
+  +3.50 -> +1.13: the two reconcile because vetoing frees position slots and the
+  replacement trades are worse. Most of R09's damage was that indirect effect,
+  not the filter's own selection.
+- **The higher-low structural objection is not distinguishable from noise.**
+  Trading against the session structure: -1.35 bps against +0.57 with it,
+  difference t = -0.37 on n = 903. Sharper on the short leg (-4.63 vs +5.31) but
+  on 121 trades, and the long leg flips sign — and it contradicts the "fights
+  the last six bars" slice on a larger sample.
+
+- **The late entry in the charted TSLA loser was caused by the blackout.**
+  Baseline entered 09:40 at 395.60 as price left the 400 level, before the fall
+  to 386. With `no_entry_before=10:20` the first admissible bar was 10:25, 25
+  minutes after the low, into the rally: -324 bps. The delay does not take the
+  same trade later, it takes the reversal.
+- **With the state machine corrected, entering on the break beats waiting for
+  the retest**: gross +4.25 bps (t = +1.84) against +3.70 (t = +1.61), maxDD
+  -6.22% against -8.35%. Still under Bonferroni for 26 trials (|t| ~ 3.2), and
+  R10 §5's cost finding applies unchanged. Config default stays
+  `require_retest: true`, which is what the report specifies.
+
+- **Position sizing was anti-correlated with the edge — this is why total
+  return stayed negative while per-trade expectancy was positive.**
+  `weight = risk_per_trade / (stop_sigmas * sigma_H)` gives a tight stop a large
+  position, so `corr(sigma, notional) = -0.897`. But the edge here grows with
+  volatility: lowest-vol quintile -1.44 bps at a 38% win rate, highest-vol
+  +7.45 bps at 51%. The strategy bet most on its worst trades. Equal-weighted
+  mean +1.25 bps against a notional-weighted **-0.83 bps** — that gap is the
+  entire discrepancy. Not a bug; the textbook rule, wrong for an edge that
+  scales with volatility.
+- With only the sizing changed, total return goes **-2.17% -> +4.56%**
+  (Sharpe +0.41, maxDD -8.00%, gross +4.27 bps at t = +1.85). Same entries,
+  exits and fills.
+- **The win rate was never the problem**: 45.5% against a 43.0% breakeven,
+  carried by a payoff ratio above 1.
+- **It still fails on honest costs.** Equal sizing raises the share of trades in
+  the first two bars from 49% to 58%, because it stops shrinking positions in
+  the volatile names the open produces. At measured spreads the variant runs
+  **-2.99 bps/trade**; the bar 0-1 bucket needs a half-spread under 2.25 bps
+  against 4.91 measured.
 
 ### Validation
 
@@ -560,6 +1640,62 @@
 - The single-symbol engine, portfolio and `Strategy` interface, replaced rather
   than kept alongside (CLAUDE.md §9). `ma_cross` was migrated.
 
+- **`session_drift_zscore` measures position, not direction.** It is
+  `sum(r since the open)/(sigma*sqrt(n))`, so a large early move fixes its sign
+  for the rest of the session. Worked example (TSLA 2025-01-30, short at 10:25,
+  -324 bps): drift since the open -284 bps giving `momentum_z` -1.09, while the
+  last 6 bars were **+120 bps** and the session low was 25 minutes old. The
+  filter said "short" into a 25-minute rally.
+- **Fixing it makes the backtest worse**: gross/trade +3.50 (session) -> +2.98
+  (ewma span 12) -> +1.13 (ewma span 6). The reason is a direct slice: 19% of
+  entries are taken *against* the last six bars and those earn +6.58 bps against
+  +2.77 for the ones that agree. The stale indicator was accidentally producing
+  counter-trend entries, and on this universe fading beats following (R04/R05:
+  momentum rank IC -0.023, t = -11.2). Broken on mechanics, broken in the
+  profitable direction.
+- **Requiring Kronos agreement is worth +0.28 bps at t = +0.06** over all 2,750
+  scored trades (agreed 45.8% hit / +3.86 bps on 33% of the book; disagreed
+  45.2% / +3.58 bps). This is less damaging than R09's backtest, which showed
+  +3.50 -> +1.13: the two reconcile because vetoing frees position slots and the
+  replacement trades are worse. Most of R09's damage was that indirect effect,
+  not the filter's own selection.
+- **The higher-low structural objection is not distinguishable from noise.**
+  Trading against the session structure: -1.35 bps against +0.57 with it,
+  difference t = -0.37 on n = 903. Sharper on the short leg (-4.63 vs +5.31) but
+  on 121 trades, and the long leg flips sign — and it contradicts the "fights
+  the last six bars" slice on a larger sample.
+
+- **The late entry in the charted TSLA loser was caused by the blackout.**
+  Baseline entered 09:40 at 395.60 as price left the 400 level, before the fall
+  to 386. With `no_entry_before=10:20` the first admissible bar was 10:25, 25
+  minutes after the low, into the rally: -324 bps. The delay does not take the
+  same trade later, it takes the reversal.
+- **With the state machine corrected, entering on the break beats waiting for
+  the retest**: gross +4.25 bps (t = +1.84) against +3.70 (t = +1.61), maxDD
+  -6.22% against -8.35%. Still under Bonferroni for 26 trials (|t| ~ 3.2), and
+  R10 §5's cost finding applies unchanged. Config default stays
+  `require_retest: true`, which is what the report specifies.
+
+- **Position sizing was anti-correlated with the edge — this is why total
+  return stayed negative while per-trade expectancy was positive.**
+  `weight = risk_per_trade / (stop_sigmas * sigma_H)` gives a tight stop a large
+  position, so `corr(sigma, notional) = -0.897`. But the edge here grows with
+  volatility: lowest-vol quintile -1.44 bps at a 38% win rate, highest-vol
+  +7.45 bps at 51%. The strategy bet most on its worst trades. Equal-weighted
+  mean +1.25 bps against a notional-weighted **-0.83 bps** — that gap is the
+  entire discrepancy. Not a bug; the textbook rule, wrong for an edge that
+  scales with volatility.
+- With only the sizing changed, total return goes **-2.17% -> +4.56%**
+  (Sharpe +0.41, maxDD -8.00%, gross +4.27 bps at t = +1.85). Same entries,
+  exits and fills.
+- **The win rate was never the problem**: 45.5% against a 43.0% breakeven,
+  carried by a payoff ratio above 1.
+- **It still fails on honest costs.** Equal sizing raises the share of trades in
+  the first two bars from 49% to 58%, because it stops shrinking positions in
+  the volatile names the open produces. At measured spreads the variant runs
+  **-2.99 bps/trade**; the bar 0-1 bucket needs a half-spread under 2.25 bps
+  against 4.91 measured.
+
 ### Validation
 
 - `pytest` — 84 passed.
@@ -603,12 +1739,78 @@
 
 ### Fixed
 
+- **The retest was never filtering anything.** `_track_break` tested "price is
+  beyond a level" rather than "price was not already beyond it", so a break
+  re-registered every bar, resetting `broke_age` to 0 and clearing `retested`;
+  the same call then re-set it if that bar's range straddled the zone. 81.4% of
+  live breaks sat at age 0. "Break -> come back -> retest -> hold" was in
+  practice a single-bar test of "price is beyond the level and this bar
+  straddles it". A break now registers once and ages; age-0 share falls to
+  42.3%. Two regression tests pin it. Found because removing the retest
+  requirement altogether changed the trade count by 19 out of 2,788.
+
 - Engine re-sized held positions every bar, emitting ~590 one-share rounding
   trades on a 21-session run. It now trades only when the target exposure
   changes (regression test added).
 - Round-trip PnL double-counted spread: gross PnL is now measured on pre-cost
   reference prices, with spread/slippage and commission reported separately, so
   `net_pnl` reconciles exactly with the cash change.
+
+- **`session_drift_zscore` measures position, not direction.** It is
+  `sum(r since the open)/(sigma*sqrt(n))`, so a large early move fixes its sign
+  for the rest of the session. Worked example (TSLA 2025-01-30, short at 10:25,
+  -324 bps): drift since the open -284 bps giving `momentum_z` -1.09, while the
+  last 6 bars were **+120 bps** and the session low was 25 minutes old. The
+  filter said "short" into a 25-minute rally.
+- **Fixing it makes the backtest worse**: gross/trade +3.50 (session) -> +2.98
+  (ewma span 12) -> +1.13 (ewma span 6). The reason is a direct slice: 19% of
+  entries are taken *against* the last six bars and those earn +6.58 bps against
+  +2.77 for the ones that agree. The stale indicator was accidentally producing
+  counter-trend entries, and on this universe fading beats following (R04/R05:
+  momentum rank IC -0.023, t = -11.2). Broken on mechanics, broken in the
+  profitable direction.
+- **Requiring Kronos agreement is worth +0.28 bps at t = +0.06** over all 2,750
+  scored trades (agreed 45.8% hit / +3.86 bps on 33% of the book; disagreed
+  45.2% / +3.58 bps). This is less damaging than R09's backtest, which showed
+  +3.50 -> +1.13: the two reconcile because vetoing frees position slots and the
+  replacement trades are worse. Most of R09's damage was that indirect effect,
+  not the filter's own selection.
+- **The higher-low structural objection is not distinguishable from noise.**
+  Trading against the session structure: -1.35 bps against +0.57 with it,
+  difference t = -0.37 on n = 903. Sharper on the short leg (-4.63 vs +5.31) but
+  on 121 trades, and the long leg flips sign — and it contradicts the "fights
+  the last six bars" slice on a larger sample.
+
+- **The late entry in the charted TSLA loser was caused by the blackout.**
+  Baseline entered 09:40 at 395.60 as price left the 400 level, before the fall
+  to 386. With `no_entry_before=10:20` the first admissible bar was 10:25, 25
+  minutes after the low, into the rally: -324 bps. The delay does not take the
+  same trade later, it takes the reversal.
+- **With the state machine corrected, entering on the break beats waiting for
+  the retest**: gross +4.25 bps (t = +1.84) against +3.70 (t = +1.61), maxDD
+  -6.22% against -8.35%. Still under Bonferroni for 26 trials (|t| ~ 3.2), and
+  R10 §5's cost finding applies unchanged. Config default stays
+  `require_retest: true`, which is what the report specifies.
+
+- **Position sizing was anti-correlated with the edge — this is why total
+  return stayed negative while per-trade expectancy was positive.**
+  `weight = risk_per_trade / (stop_sigmas * sigma_H)` gives a tight stop a large
+  position, so `corr(sigma, notional) = -0.897`. But the edge here grows with
+  volatility: lowest-vol quintile -1.44 bps at a 38% win rate, highest-vol
+  +7.45 bps at 51%. The strategy bet most on its worst trades. Equal-weighted
+  mean +1.25 bps against a notional-weighted **-0.83 bps** — that gap is the
+  entire discrepancy. Not a bug; the textbook rule, wrong for an edge that
+  scales with volatility.
+- With only the sizing changed, total return goes **-2.17% -> +4.56%**
+  (Sharpe +0.41, maxDD -8.00%, gross +4.27 bps at t = +1.85). Same entries,
+  exits and fills.
+- **The win rate was never the problem**: 45.5% against a 43.0% breakeven,
+  carried by a payoff ratio above 1.
+- **It still fails on honest costs.** Equal sizing raises the share of trades in
+  the first two bars from 49% to 58%, because it stops shrinking positions in
+  the volatile names the open produces. At measured spreads the variant runs
+  **-2.99 bps/trade**; the bar 0-1 bucket needs a half-spread under 2.25 bps
+  against 4.91 measured.
 
 ### Validation
 

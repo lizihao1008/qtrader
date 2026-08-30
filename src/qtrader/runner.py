@@ -30,6 +30,10 @@ class Run:
     strategy: Strategy
     result: BacktestResult
 
+    #: The LLM layer's report when one ran, else ``None``. Its presence is how
+    #: downstream code tells Baseline Mode from LLM Enhanced Mode.
+    validation: object | None = None
+
 
 def build_context(config: RunConfig, store: BarStore | None = None) -> MarketContext:
     """Load the universe's data and decide what was tradable at each bar."""
@@ -51,17 +55,32 @@ def execute(
     config: RunConfig,
     store: BarStore | None = None,
     context: MarketContext | None = None,
+    validator=None,
 ) -> Run:
     """Run one configured backtest end to end.
 
     ``context`` may be supplied to reuse an already-loaded panel — a parameter
     sweep runs dozens of strategies over identical data and should read the
     parquet files once.
+
+    ``validator`` is an optional callable ``(signals, context) -> report`` that
+    may **narrow** the strategy's entries — the LLM layer (ADR-0007). Omitted,
+    this function behaves exactly as it did before it existed, which is what
+    makes the two modes comparable: Baseline is not a configuration of the
+    enhanced path, it is the absence of the enhanced path.
     """
     context = context or build_context(config, store)
     strategy = build_strategy(config.strategy.name, config.strategy.params)
     signals = strategy.generate(context)
+
+    validation = None
+    if validator is not None:
+        validation = validator(signals, context)
+        signals = validation.signals
+
     result = BacktestEngine(config.costs, config.execution).run(context, signals)
+    if validation is not None:
+        result.metrics["validation"] = validation.counts
 
     # Signal quality is evaluated separately from PnL: a strategy can be right
     # about the ranking and still lose money to costs, and the two failures need
@@ -72,4 +91,5 @@ def execute(
             context.panel.close[list(context.symbols)],
             context.tradable,
         )
-    return Run(config=config, context=context, strategy=strategy, result=result)
+    return Run(config=config, context=context, strategy=strategy, result=result,
+               validation=validation)

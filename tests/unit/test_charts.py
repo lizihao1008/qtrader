@@ -145,3 +145,32 @@ def test_a_gallery_of_every_losing_trade_renders():
     )
     figure = episode_gallery(episodes, list(episodes.features.index), title="all of them")
     assert len(figure.data) == 40
+
+
+def test_a_sign_series_is_not_drawn_on_the_price_axis():
+    """`vwap_side` is in {-1,0,1}; on the price axis it flattens the candles."""
+    result = run(120)
+    indicators = pd.DataFrame(
+        {
+            "vwap_side": [1.0, -1.0] * 60,          # a sign, despite the name
+            "vwap_session": [100.0] * 120,          # an actual price level
+        },
+        index=result.panel.index,
+    )
+    result.signals.indicators["AAA"] = indicators
+
+    names = {str(trace.name).lower() for trace in price_chart(result, "AAA").data}
+    assert "vwap_session" in names, "a real price level must still be drawn"
+    assert "vwap_side" not in names, "a sign series was drawn against price"
+
+
+def test_a_window_charts_only_that_slice():
+    result = run(300)
+    index = result.panel.index
+    figure = price_chart(result, "AAA", window=(index[100], index[140]))
+
+    candles = next(t for t in figure.data if t.type == "candlestick")
+    assert len(candles.x) == 41
+    for trace in figure.data:
+        if trace.name and trace.name.endswith("fill") and len(trace.x):
+            assert min(trace.x) >= min(candles.x) and max(trace.x) <= max(candles.x)
