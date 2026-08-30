@@ -1,0 +1,6 @@
+# One-symbol universe for the MU session study. SPY is the benchmark only — it
+# is never traded, but the relative/residual features need a reference series.
+name: single_mu
+benchmark: SPY
+symbols:
+  - MU

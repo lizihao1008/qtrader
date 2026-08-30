@@ -13,6 +13,12 @@ scripts/                   the only entry points
   run_backtest.py          config -> results/<run_id>/
   sweep.py                 vary parameters over the same data
   analyze_episodes.py      collect trade windows, screen what separated wins from losses
+  search.py                one hypothesis -> attribution -> trial ledger
+  audit_execution.py       five checks that fills are realistic and the past is fixed
+  kronos_confirm.py        score a strategy's entry candidates with Kronos, cache them
+  analyze_confirmation.py  does a confirmation score predict candidate outcomes at all
+  plot_setups.py           best/worst trades with their levels and Kronos forecasts
+                           (any strategy; see docs/HOWTO-galleries.md)
 src/qtrader/
   config.py                RunConfig / DataConfig / StrategyConfig (YAML -> dataclasses)
   runner.py                the pipeline order: config -> context -> strategy -> engine
@@ -20,6 +26,7 @@ src/qtrader/
   universe/                universe definition, per-bar tradability filters
   features/                stock indicators, relative/residual returns, cross-sectional ranks
   strategies/              market context -> target weights
+  models/                  external forecasting models used as confirmation, never as strategies
   backtest/                costs, portfolio accounting, engine, metrics, signal metrics
   analysis/                trade episodes and conditional screening
   viz/                     plotly charts + HTML report
@@ -29,8 +36,8 @@ docs/                      context, progress, ADRs, changelog
 data/, results/            generated, git-ignored
 ```
 
-Not created yet (planned, see outline §15): `regime/`, `labels/`, `models/`,
-`risk/`, `execution/`.
+Not created yet (planned, see outline §15): `regime/`, `labels/`, `risk/`,
+`execution/`.
 
 ## 2. End-to-end data flow
 
@@ -118,6 +125,17 @@ using price, trailing median dollar volume and staleness — all causal.
   (from rolling moments, clipped), `residual_returns`, `trailing_return`.
 * `ranks.py` — cross-sectional rank / z-score / count, all requiring an
   eligibility mask so ineligible names never enter the moments.
+* `levels.py` — ex-ante support/resistance. `average_true_range` takes
+  `restart` so the previous close does not cross a session boundary; without it
+  the first bar of a session has a true range equal to the overnight gap, and
+  since ATR sets the break-zone width that puts yesterday's price into today's
+  definition of a break (R11 §1). Families: previous-day high/low fixed at the
+  prior close, opening-range high/low that does **not exist** until the range
+  has closed, static round numbers, Wilder `average_true_range`, and
+  `level_zone` = `max(1 tick, level_atr * ATR)` so a one-cent touch is not a
+  break. Round levels must be *lagged by a bar* before use as a break
+  reference — `nearest_round_levels` brackets the price it is given, so
+  comparing a price to its own bracket is unsatisfiable by construction.
 * `seasonality.py` — the intraday volatility U-shape. `seasonal_volatility`
   multiplies a rolling level estimate by a per-minute-of-session profile fitted
   on **completed prior sessions only**. A flat sigma understates the open by
@@ -148,6 +166,32 @@ post-trade screening — scale-free, causal quantities only.
   `|z|` has cooled below it. Because the stop
   depends on the best price since entry, `_walk` is an explicit loop over bars,
   vectorised across symbols; everything else stays vectorised.
+
+* `sr_momentum.py` — the second **path-dependent** strategy. A state machine per
+  symbol: break an ex-ante level by more than its zone, retest it within
+  `retest_bars`, close back on the breakout side, with momentum, relative volume
+  and VWAP side agreeing. Released by the same ratchet as `trend_ratchet`. It
+  publishes a `candidate` column of proposed entry directions, which is the
+  convention that lets an expensive external model be scored once on candidates
+  and cached instead of run on every bar. Measured null (R09).
+
+### `models/`
+External forecasting models, used **only** to veto entries a strategy already
+proposed — never as signals of their own.
+* `kronos_confirm.py` — `collect_candidates` reads a strategy's `candidate`
+  column; `forecast_paths` returns the predicted OHLCV paths for charting;
+  `score_candidates` batches context windows through an injected
+  `KronosPredictor` and returns a timestamp x symbol score. **The context window
+  ends at the candidate bar inclusive**; the forecast begins after it. The
+  predictor is injected so the module has no torch dependency and is testable
+  with a stub. Scores cache to parquet and reach a strategy through
+  `confirmation_path`; a missing score is a refusal, not a pass.
+
+  Both entry points share `_run_batches`, so the window slice — the causality
+  guarantee — exists in exactly one place.
+
+  Measured on 15,645 candidates: rank IC −0.011 against realised outcomes, 49%
+  directional agreement. Null. See R09.
 
 ### `backtest/`
 * `costs.py` — `CostModel.fill_price` (half spread + slippage, direction-aware)
@@ -213,6 +257,15 @@ the tail is not a survivorship artifact), `episode_gallery` (best/worst trades
 as normalised candlestick panels, shorts flipped so up is profit) and
 `write_episode_report`.
 
+`setups.py::setup_gallery` is the deliberate opposite normalisation: panels stay
+in **real prices**, because a support level does not survive being rescaled per
+panel, and shorts are not flipped. Each panel carries the level the rule was
+watching with its tolerance zone shaded, an entry marker pointing the predicted
+direction, and an external model's forecast path drawn forward from the decision
+bar. Both the level and the forecast are read at **offset -1**, the decision
+bar — at offset 0 the position is already open, the break state is consumed, and
+reading there draws nothing while still producing a plausible-looking chart.
+
 `price_chart` has a fixed four-row layout so **any** strategy charts readably:
 price (candles + price-level indicator lines + BUY/SELL markers at executed
 prices, capped at the most recent `MAX_CANDLES`), volume, MACD, and the
@@ -232,6 +285,30 @@ order.
 `registry.save_run` writes CSVs, `metrics.json`, `report.html` and
 `manifest.json`. `sweep.sweep` re-runs one strategy across a parameter grid on
 shared data and returns one row of metrics per combination.
+
+## 3a. Known interaction: a veto filter is not a subtraction
+
+`sr_momentum` caps the book at `max_positions`, and `_respect_book_limit` ranks
+competing candidates by `|momentum_z|` and keeps the strongest. While that cap
+binds, **vetoing an entry does not remove a trade — it frees a slot that a
+weaker candidate fills.** Trade count and turnover go *up*, and measured
+performance falls for reasons that have nothing to do with the filter's own
+information. This has now confounded three separate experiments (R09, R10 §3,
+R11 §2). Evaluate any filter both as a veto and as a ranking input, and always
+report the trade count alongside the return.
+
+## 3b. Known limitation: costs are flat, spreads are not
+
+`costs.py` applies one `half_spread_bps` to every fill regardless of time of
+day. Roll (1984) estimated on 1-minute bars for this universe gives a
+half-spread of **4.91 bps in the first five minutes of the session against
+0.34 bps between 11:30 and 14:30** — a factor of 14. The configured 1.0 bps is
+therefore roughly 3x conservative mid-day and roughly 5x optimistic at the open.
+
+Any strategy whose turnover concentrates in the first half hour has an inflated
+backtest here. `sr_momentum` puts 49% of its entries in the second bar of the
+session, and correcting for measured spreads moves it from +0.50 to
+−3.09 bps/trade. See R10; a time-of-day cost model is the recorded next action.
 
 ## 4. Invariants worth protecting
 

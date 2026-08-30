@@ -44,6 +44,32 @@ MAX_CANDLES = 2_000
 MAX_LINE_POINTS = 4_000
 
 
+def _price_lines(indicators: pd.DataFrame, bars: pd.DataFrame) -> list[str]:
+    """Indicator columns that genuinely live on the price axis.
+
+    The name prefix alone is not enough: `vwap_side` starts with "vwap" but is a
+    sign in {-1, 0, +1}. Drawn on the price axis it forces the range down to
+    zero and flattens the candles into a band at the top of the panel. So the
+    name proposes and the *values* decide — a line is only drawn against price
+    if it actually sits inside the bar range.
+    """
+    low, high = bars["low"].min(), bars["high"].max()
+    if not (np.isfinite(low) and np.isfinite(high)):
+        return []
+    margin = max((high - low) * 2.0, abs(high) * 0.1)
+
+    keep = []
+    for column in indicators.columns:
+        if not column.startswith(PRICE_LINE_PREFIXES):
+            continue
+        values = indicators[column].dropna()
+        if values.empty:
+            continue
+        if low - margin <= values.median() <= high + margin:
+            keep.append(column)
+    return keep
+
+
 def _market_naive(index: pd.DatetimeIndex | pd.Series) -> pd.DatetimeIndex:
     """UTC timestamps -> tz-naive exchange-local time, for a readable axis."""
     return pd.DatetimeIndex(index).tz_convert(MARKET_TZ).tz_localize(None)
@@ -60,7 +86,8 @@ def _intraday_rangebreaks() -> list[dict]:
 
 
 def price_chart(
-    result: BacktestResult, symbol: str, *, height: int = 940, max_candles: int = MAX_CANDLES
+    result: BacktestResult, symbol: str, *, height: int = 940,
+    max_candles: int = MAX_CANDLES, window: tuple | None = None
 ) -> go.Figure:
     """One symbol's candles, volume, MACD, the strategy's own view, and its fills.
 
@@ -77,7 +104,13 @@ def price_chart(
       it exposes one and it is not already the MACD.
     """
     bars = result.panel.bars(symbol)
-    truncated = len(bars) > max_candles
+    if window is not None:
+        # An explicit [start, end] slice, for charting one session out of many.
+        # Clipping the x axis instead would leave every other bar in the figure,
+        # which is invisible on screen and very visible in the file size.
+        start, end = window
+        bars = bars.loc[(bars.index >= start) & (bars.index <= end)]
+    truncated = window is None and len(bars) > max_candles
     if truncated:
         bars = bars.tail(max_candles)
     x = _market_naive(bars.index)
@@ -85,7 +118,7 @@ def price_chart(
     indicators = result.signals.indicators.get(symbol, pd.DataFrame(index=bars.index))
     indicators = indicators.reindex(bars.index)
 
-    price_lines = [c for c in indicators.columns if c.startswith(PRICE_LINE_PREFIXES)]
+    price_lines = _price_lines(indicators, bars)
     macd_panel, macd_is_reference = _macd_panel(indicators, bars["close"])
     strategy_column = _strategy_panel_column(indicators)
 
@@ -119,7 +152,11 @@ def price_chart(
             col=1,
         )
 
-    _add_trade_markers(fig, result, symbol, row=1, since=bars.index[0] if truncated else None)
+    _add_trade_markers(
+        fig, result, symbol, row=1,
+        since=bars.index[0] if (truncated or window is not None) else None,
+        until=bars.index[-1] if window is not None else None,
+    )
 
     fig.add_trace(
         go.Bar(x=x, y=bars["volume"], name="Volume", marker_color=FLAT_COLOR, showlegend=False),
@@ -203,7 +240,7 @@ def _add_series_panel(
 
 
 def _add_trade_markers(
-    fig: go.Figure, result: BacktestResult, symbol: str, *, row: int, since=None
+    fig: go.Figure, result: BacktestResult, symbol: str, *, row: int, since=None, until=None
 ) -> None:
     """Mark every fill in this symbol at its executed price: buys below, sells above."""
     fills = result.fills
@@ -212,6 +249,8 @@ def _add_trade_markers(
     fills = fills.loc[fills["symbol"] == symbol]
     if since is not None:
         fills = fills.loc[fills["timestamp"] >= since]
+    if until is not None:
+        fills = fills.loc[fills["timestamp"] <= until]
     if fills.empty:
         return
 

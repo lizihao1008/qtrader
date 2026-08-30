@@ -1,0 +1,6 @@
+# One-symbol universe for the IREN session studies. SPY is the benchmark only —
+# it is never traded, but the relative/residual features need a reference.
+name: single_iren
+benchmark: SPY
+symbols:
+  - IREN

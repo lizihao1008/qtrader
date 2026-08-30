@@ -1,0 +1,94 @@
+# Break-and-retest of ex-ante S/R levels, confirmed by momentum. 5-minute bars.
+#
+# Implements the continuation sleeve of docs/research/deep-research-report.md.
+# Parameters are the report's stated starting values, NOT search results:
+# level_atr 0.15 is its stated initial value, the opening range is its 30-minute
+# example, and the risk geometry is shared unchanged with trend_ratchet.
+#
+# Known prior, recorded so the result is read against it rather than in a vacuum:
+# R07 measured both level families used here and found no effect (round-number
+# crossings continue at -0.0035 sigma vs -0.0030 for placebos; previous-day
+# extremes sit inside their own placebo range). R04/R05 measured intraday
+# momentum as reliably wrong-signed (rank IC -0.023, t = -11.2).
+
+run_id: sr_momentum_5min
+
+universe: config/universe/us_liquid_22.yaml
+
+data:
+  timeframe: 5Min
+  feed: iex
+  start: "2024-01-02"
+  end: "2026-08-27"
+  regular_hours_only: true
+
+strategy:
+  name: sr_momentum
+  params:
+    # Previous-day highs/lows are disabled by instruction: no prior-session
+    # K-line is allowed to set a level the strategy trades against. The ATR that
+    # sets the break-zone width is also session-local, so the overnight gap
+    # cannot widen today's tolerance (see features/levels.average_true_range).
+    #
+    # Still multi-session, because these are SCALES and not price levels:
+    #   relative_volume    5-session rolling median of dollar volume
+    #   seasonal_volatility per-minute profile from completed prior sessions
+    #   Kronos context     128 bars (~1.6 sessions) ending at the decision bar
+    # Restricting those to one session leaves nothing to normalise against for
+    # the first hour, which is where most entries are. R10 records the tradeoff.
+    use_previous_day: false
+    use_opening_range: true
+    use_round_numbers: true
+    round_step: 1.0
+    atr_window: 24
+    level_atr: 0.15          # report's stated starting value
+    require_retest: false    # R10 §5g: waiting for the retest measured worse
+    retest_bars: 6           # 30 minutes to come back and hold
+    momentum_z_min: 1.0
+    rvol_min: 1.0
+    require_vwap_side: true
+    vol_window: 24
+    horizon_bars: 12
+    stop_sigmas: 1.0
+    trail_sigmas: 1.5
+    # R10 §5h: risk sizing is anti-correlated with the edge here — a tight stop
+    # earns a big position, and the edge grows with volatility.
+    sizing: equal
+    risk_per_trade: 0.001
+    max_weight: 0.15
+    max_positions: 6
+    allow_long: true
+    allow_short: true
+    # no_entry_before is available and tested but deliberately unset: R10 found
+    # it removes the highest-gross bucket while RAISING turnover, because a
+    # blocked setup re-enters on the first admitted bar rather than being
+    # cancelled. The open needs to be charged properly, not avoided.
+    # Kronos cross-validation: DISABLED. Superseded by the local-LLM decision
+    # layer (ADR-0007); the measured cost of the Kronos veto is in R11 §2.
+    # To re-enable, set confirmation_path/confirmation_min again.
+    no_entry_after: "15:00"
+    flat_time: "15:50"
+
+liquidity:
+  min_price: 5.0
+  min_dollar_volume: 100000.0
+  lookback_bars: 12
+  max_stale_bars: 2
+
+costs:
+  half_spread_bps: 1.0
+  slippage_bps: 0.5
+  commission_bps: 0.0
+  commission_per_share: 0.0
+  min_commission: 0.0
+
+execution:
+  initial_cash: 100000.0
+  gross_leverage: 0.95
+  execution_lag_bars: 1
+  execution_price: open
+  whole_shares: true
+  min_trade_notional: 250.0
+
+report:
+  symbols: [NVDA, TSLA]

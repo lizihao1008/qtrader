@@ -1,0 +1,65 @@
+# MU, single name, 5-minute bars — the session studies for the LLM layer.
+#
+# Same strategy and same parameters as sr_momentum_5min.yaml; only the universe
+# and window differ. A one-symbol universe means the book limit never binds, so
+# a veto removes a trade outright and Baseline vs LLM Enhanced is a clean
+# subtraction (ADR-0007).
+
+run_id: sr_momentum_mu
+
+universe: config/universe/single_mu.yaml
+
+data:
+  timeframe: 5Min
+  feed: iex
+  start: "2026-06-08"
+  end: "2026-06-30"
+  regular_hours_only: true
+
+strategy:
+  name: sr_momentum
+  params:
+    use_previous_day: false
+    use_opening_range: true
+    use_round_numbers: true
+    round_step: 1.0
+    atr_window: 24
+    level_atr: 0.15
+    require_retest: false
+    retest_bars: 6
+    momentum_z_min: 1.0
+    rvol_min: 1.0
+    require_vwap_side: true
+    vol_window: 24
+    horizon_bars: 12
+    stop_sigmas: 1.0
+    trail_sigmas: 1.5
+    sizing: equal
+    risk_per_trade: 0.001
+    max_weight: 0.95
+    max_positions: 1
+    allow_long: true
+    allow_short: true
+    no_entry_after: "15:00"
+    flat_time: "15:50"
+
+liquidity:
+  min_price: 5.0
+  min_dollar_volume: 100000.0
+  lookback_bars: 12
+  max_stale_bars: 2
+
+costs:
+  half_spread_bps: 1.0
+  slippage_bps: 0.5
+
+execution:
+  initial_cash: 100000.0
+  gross_leverage: 0.95
+  execution_lag_bars: 1
+  execution_price: open
+  whole_shares: true
+  min_trade_notional: 250.0
+
+report:
+  symbols: [MU]
