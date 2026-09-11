@@ -17,6 +17,8 @@ empty overnight gaps.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -30,6 +32,13 @@ LONG_COLOR = "#26a69a"
 SHORT_COLOR = "#ef5350"
 FLAT_COLOR = "#90a4ae"
 ACCENT_COLOR = "#5c6bc0"
+
+#: Distinct colours for an overlay of many factor series on one panel.
+OVERLAY_COLORS = (
+    "#5c6bc0", "#26a69a", "#ef5350", "#ffa726",
+    "#ab47bc", "#26c6da", "#8d6e63", "#78909c",
+    "#ec407a", "#9ccc65",
+)
 
 #: Indicator columns drawn on the price axis; everything else goes to its own row.
 PRICE_LINE_PREFIXES = ("sma", "ema", "vwap", "ma_", "band")
@@ -87,7 +96,10 @@ def _intraday_rangebreaks() -> list[dict]:
 
 def price_chart(
     result: BacktestResult, symbol: str, *, height: int = 940,
-    max_candles: int = MAX_CANDLES, window: tuple | None = None
+    max_candles: int = MAX_CANDLES, window: tuple | None = None,
+    extra_panel: Sequence[str] | None = None,
+    extra_panel_title: str = "Factors",
+    return_panel: bool = False,
 ) -> go.Figure:
     """One symbol's candles, volume, MACD, the strategy's own view, and its fills.
 
@@ -100,8 +112,14 @@ def price_chart(
       series are drawn, since its periods are the ones that mattered; otherwise
       a standard MACD(12, 26, 9) is computed here as a reference and labelled
       as such, so a chart never lacks the indicator a reader expects;
+    * **optional extra overlay** — ``extra_panel`` names indicator columns to
+      draw together on a new row *immediately below MACD*. Used to watch several
+      cross-sectional z-scores move with the session's bars;
     * **the strategy's own panel** — its score, trend statistic or signal, when
-      it exposes one and it is not already the MACD.
+      it exposes one and it is not already the MACD;
+    * **optional return panel** — this symbol's buy-and-hold return over the
+      charted window, and the strategy's net return rebased to the same start.
+      Off by default so HTML reports keep their layout.
     """
     bars = result.panel.bars(symbol)
     if window is not None:
@@ -121,9 +139,24 @@ def price_chart(
     price_lines = _price_lines(indicators, bars)
     macd_panel, macd_is_reference = _macd_panel(indicators, bars["close"])
     strategy_column = _strategy_panel_column(indicators)
+    extra_columns = _extra_panel_columns(indicators, extra_panel)
 
-    rows = 4 if strategy_column else 3
-    heights = [0.48, 0.10, 0.21, 0.21] if strategy_column else [0.58, 0.12, 0.30]
+    has_extra = bool(extra_columns)
+    has_strategy = strategy_column is not None
+    has_return = bool(return_panel)
+    rows, heights = _price_row_layout(
+        has_extra=has_extra, has_strategy=has_strategy, has_return=has_return,
+    )
+    row = 4
+    extra_row = strategy_row = return_row = None
+    if has_extra:
+        extra_row = row
+        row += 1
+    if has_strategy:
+        strategy_row = row
+        row += 1
+    if has_return:
+        return_row = row
     fig = make_subplots(
         rows=rows, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=heights
     )
@@ -165,8 +198,18 @@ def price_chart(
     )
 
     _add_macd_panel(fig, x, macd_panel, row=3, reference=macd_is_reference)
-    if strategy_column:
-        _add_series_panel(fig, x, indicators[strategy_column], strategy_column, row=4)
+    if extra_row is not None:
+        _add_overlay_panel(
+            fig, x, indicators[extra_columns], extra_columns,
+            row=extra_row, title=extra_panel_title,
+        )
+    if strategy_row is not None:
+        assert strategy_column is not None
+        _add_series_panel(
+            fig, x, indicators[strategy_column], strategy_column, row=strategy_row
+        )
+    if return_row is not None:
+        _add_return_panel(fig, x, result, symbol, bars, row=return_row)
 
     window = f", last {len(bars):,} bars" if truncated else ""
     fig.update_layout(
@@ -182,6 +225,35 @@ def price_chart(
     fig.update_yaxes(title_text="Volume", row=2, col=1)
     fig.update_xaxes(title_text="Time", row=rows, col=1)
     return fig
+
+
+def _price_row_layout(
+    *, has_extra: bool, has_strategy: bool, has_return: bool = False,
+) -> tuple[int, list[float]]:
+    """Row count and heights for the price / volume / MACD / optional overlays."""
+    rows = 3 + int(has_extra) + int(has_strategy) + int(has_return)
+    heights = {
+        3: [0.58, 0.12, 0.30],
+        4: [0.48, 0.10, 0.21, 0.21],
+        5: [0.40, 0.08, 0.16, 0.18, 0.18],
+        6: [0.32, 0.07, 0.13, 0.16, 0.16, 0.16],
+    }
+    return rows, heights[rows]
+
+
+def _extra_panel_columns(
+    indicators: pd.DataFrame, extra_panel: Sequence[str] | None
+) -> list[str]:
+    """Requested overlay columns that actually exist on this strategy's indicators."""
+    if not extra_panel:
+        return []
+    present = [c for c in extra_panel if c in indicators.columns]
+    if not present:
+        raise ValueError(
+            "extra_panel names none of the published indicators: "
+            f"{list(extra_panel)}; have {list(indicators.columns)}"
+        )
+    return present
 
 
 def _macd_panel(indicators: pd.DataFrame, close: pd.Series) -> tuple[pd.DataFrame, bool]:
@@ -237,6 +309,71 @@ def _add_series_panel(
     )
     fig.add_hline(y=0, line=dict(width=1, color=FLAT_COLOR), row=row, col=1)
     fig.update_yaxes(title_text=name.replace("_", " ").title(), row=row, col=1)
+
+
+def _add_return_panel(
+    fig: go.Figure,
+    x: pd.DatetimeIndex,
+    result: BacktestResult,
+    symbol: str,
+    bars: pd.DataFrame,
+    *,
+    row: int,
+) -> None:
+    """Buy-and-hold of this symbol vs the strategy, both rebased to the window start."""
+    close = bars["close"].astype(float)
+    first = close.dropna().iloc[0]
+    index_pct = (close / first - 1.0) * 100.0
+
+    curve = result.equity_curve.reindex(bars.index)
+    strat = curve["cum_return"].astype(float)
+    if strat.notna().any():
+        origin = float(strat.dropna().iloc[0])
+        strat_pct = ((1.0 + strat) / (1.0 + origin) - 1.0) * 100.0
+    else:
+        strat_pct = pd.Series(np.nan, index=bars.index)
+
+    fig.add_hline(y=0, line=dict(width=1, color=FLAT_COLOR), row=row, col=1)
+    fig.add_trace(
+        go.Scatter(
+            x=x, y=index_pct, mode="lines", name=f"{symbol} B&H",
+            line=dict(width=1.4, color=FLAT_COLOR, dash="dot"),
+        ),
+        row=row,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=x, y=strat_pct, mode="lines", name="Strategy (net)",
+            line=dict(width=1.6, color=LONG_COLOR),
+        ),
+        row=row,
+        col=1,
+    )
+    fig.update_yaxes(title_text="Return (%)", row=row, col=1)
+
+
+def _add_overlay_panel(
+    fig: go.Figure,
+    x: pd.DatetimeIndex,
+    frame: pd.DataFrame,
+    columns: Sequence[str],
+    *,
+    row: int,
+    title: str,
+) -> None:
+    """Several series on one row, sharing a zero line so z-scores read as a group."""
+    fig.add_hline(y=0, line=dict(width=1, color=FLAT_COLOR), row=row, col=1)
+    for i, column in enumerate(columns):
+        fig.add_trace(
+            go.Scatter(
+                x=x, y=frame[column], mode="lines", name=column,
+                line=dict(width=1.3, color=OVERLAY_COLORS[i % len(OVERLAY_COLORS)]),
+            ),
+            row=row,
+            col=1,
+        )
+    fig.update_yaxes(title_text=title, row=row, col=1)
 
 
 def _add_trade_markers(

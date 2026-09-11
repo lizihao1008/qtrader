@@ -27,6 +27,22 @@ class AlpacaCredentialsError(RuntimeError):
     """Raised when API credentials are not available in the environment."""
 
 
+class UnknownSymbolError(ValueError):
+    """The provider does not list this name, so there is nothing to download."""
+
+
+#: Names people type that are not Alpaca tickers. There is no Nikkei 225 listing.
+#: ``JPXN`` (JPX-Nikkei 400) is the only US name that contains "Nikkei", but IEX
+#: prints it a few times a day — unusable as a minute series. ``EWJ`` (MSCI
+#: Japan) is the liquid Japan ETF on this feed, so that is what the lab fetches.
+SYMBOL_ALIASES = {
+    "NIKKEI": "EWJ",
+    "NIKKEI225": "EWJ",
+    "N225": "EWJ",
+    "NKY": "EWJ",
+}
+
+
 def _parse_timeframe(timeframe: str):
     from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
@@ -115,6 +131,90 @@ class AlpacaBarClient:
             else _empty_bars()
             for symbol in symbols
         }
+
+
+def resolve_symbol(
+    name: str,
+    *,
+    lookup=None,
+    search_names=None,
+) -> str:
+    """Map a user-typed name to an Alpaca ticker.
+
+    Order: strip/upper, apply :data:`SYMBOL_ALIASES`, then (only if ``lookup``
+    or ``search_names`` is supplied, or the name is not ticker-shaped) ask the
+    provider. A ticker-shaped name is returned as-is so the lab can use a
+    local parquet without hitting the network. Unknown names fail later, when
+    a download returns nothing.
+    """
+    raw = name.strip()
+    if not raw:
+        raise UnknownSymbolError("empty symbol")
+    ticker = SYMBOL_ALIASES.get(raw.upper(), raw.upper())
+    if lookup is None and search_names is None:
+        return ticker
+
+    found = lookup(ticker) if lookup is not None else None
+    if found:
+        return found
+    if search_names is None:
+        raise UnknownSymbolError(
+            f"{name!r} is not listed on Alpaca under {ticker!r}"
+        )
+    hits = list(search_names(raw))
+    if len(hits) == 1:
+        return hits[0]
+    if len(hits) > 1:
+        raise UnknownSymbolError(
+            f"{name!r} is not a ticker; Alpaca name matches: {', '.join(hits)}. "
+            "Pass one of those symbols."
+        )
+    raise UnknownSymbolError(f"{name!r} is not listed on Alpaca")
+
+
+def alpaca_lookup(symbol: str) -> str | None:
+    """``get_asset``; ``None`` on 404."""
+    from alpaca.common.exceptions import APIError
+
+    try:
+        asset = _trading_client().get_asset(symbol)
+    except APIError as exc:
+        if "404" in str(exc):
+            return None
+        raise
+    return asset.symbol
+
+
+def alpaca_search_names(query: str) -> list[str]:
+    """Active, tradable US names whose description contains ``query``."""
+    from alpaca.trading.enums import AssetClass, AssetStatus
+    from alpaca.trading.requests import GetAssetsRequest
+
+    needle = query.strip().lower()
+    if not needle:
+        return []
+    assets = _trading_client().get_all_assets(
+        GetAssetsRequest(status=AssetStatus.ACTIVE, asset_class=AssetClass.US_EQUITY)
+    )
+    return sorted(
+        {
+            a.symbol
+            for a in assets
+            if a.tradable and a.name and needle in a.name.lower()
+        }
+    )
+
+
+def _trading_client():
+    api_key = os.environ.get("ALPACA_API_KEY")
+    secret_key = os.environ.get("ALPACA_SECRET_KEY")
+    if not api_key or not secret_key:
+        raise AlpacaCredentialsError(
+            "set ALPACA_API_KEY and ALPACA_SECRET_KEY in the environment"
+        )
+    from alpaca.trading.client import TradingClient
+
+    return TradingClient(api_key, secret_key, paper=True)
 
 
 def _empty_bars() -> pd.DataFrame:

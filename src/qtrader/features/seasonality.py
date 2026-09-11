@@ -96,3 +96,49 @@ def seasonal_volatility(
     )
     level = returns.rolling(window, min_periods=min_periods or window // 2).std()
     return level.mul(profile, axis=0)
+
+
+def seasonal_volume_ratio(
+    volume: pd.DataFrame,
+    *,
+    session: pd.Series,
+    bar_of_session: pd.Series,
+    window: int = 5,
+    min_sessions: int = MIN_SESSIONS,
+) -> pd.DataFrame:
+    """Relative volume against the same minute of earlier sessions (RVOL).
+
+    Intraday volume has a pronounced U-shape: the first minutes of a session
+    carry many times the volume of the middle of the day. Comparing a bar to a
+    flat rolling average therefore reports "unusually busy" for every open and
+    "unusually quiet" for every lunchtime, which is a clock, not a signal.
+
+    The denominator is the mean volume at *this minute of the session*, taken
+    over completed prior sessions only — expanded and then shifted by one
+    session, so today never contributes to its own baseline. The numerator is
+    the trailing ``window``-bar mean, so a single print does not dominate.
+
+    ``NaN`` until ``min_sessions`` of history exist, rather than 1.0: pretending
+    an unknown baseline is average would let the first two weeks of any run
+    trade on a number that was never measured.
+    """
+    days = session.to_numpy()
+    minutes = bar_of_session.to_numpy()
+    # Reset at the open: a 5-bar mean at 09:31 must not average four of
+    # yesterday's closing minutes, which are the busiest of the day.
+    recent = volume.groupby(days).transform(
+        lambda s: s.rolling(window, min_periods=1).mean()
+    )
+
+    ratios = {}
+    for symbol in volume.columns:
+        grid = pd.DataFrame(
+            {"day": days, "minute": minutes, "v": volume[symbol].to_numpy()}
+        ).pivot_table(index="day", columns="minute", values="v", aggfunc="mean")
+        baseline = grid.expanding().mean().shift(1)
+        baseline.iloc[:min_sessions] = np.nan
+        lookup = baseline.stack(future_stack=True).rename("baseline")
+        keyed = pd.MultiIndex.from_arrays([days, minutes], names=["day", "minute"])
+        expected = pd.Series(lookup.reindex(keyed).to_numpy(), index=volume.index)
+        ratios[symbol] = recent[symbol] / expected.where(expected > 0)
+    return pd.DataFrame(ratios, index=volume.index, columns=volume.columns)

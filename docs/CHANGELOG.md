@@ -1,5 +1,1581 @@
 # Changelog
 
+## 2026-09-11 (regime thresholds moved onto the random-walk null)
+
+### Changed
+
+- `slope_z` is now the Kalman slope over its sampling scale **under a driftless
+  random walk**, not over the model posterior `sqrt(P[1,1])`. The filter carries
+  a 3x3 Lyapunov recursion `V <- A V A' + s^2 b b'` for `z = (level, slope, y)`
+  alongside `P`; `LocalLinearTrendFilter.step` returns a `FilterStep` with both
+  `slope_std` (model) and `slope_rw_std` (null), and takes a separate
+  `null_var` so a volatility profile can later change the null without touching
+  the filter's `R`.
+- Kaufman ER gates are in random-walk units: `er_rw = ER_n * sqrt(n)`, mean 1.0
+  under the null for every `n`. `er_min_entry` / `er_min_hold` are replaced by
+  `er_entry_rw` / `er_hold_rw` / `er_flip_rw`; the snapshot carries `er_rw`,
+  `signed_er_rw`, `er_bars`.
+- `exit_z` is replaced by `exit_margin` (>= 0): UP leaves when
+  `slope_z < -exit_margin`, DOWN when `slope_z > +exit_margin`. Larger is
+  stickier. The old knob read the other way round.
+- The weaken path can no longer jump straight to the opposite regime — it only
+  returns to FLAT, and `reversal_h` / `reversal_z` is the one direct UP<->DOWN
+  route. The weaken flag is released when `slope_z` recovers instead of
+  latching for the rest of the leg.
+- Presets re-derived as null quantiles and quoted by their false-entry rate on
+  simulated driftless random walks: sensitive 7.8, balanced 3.0, conservative
+  0.8 entries per session.
+- `plot_regime(..., config=cfg)` takes its reference lines from the config that
+  produced the replay.
+- `run()` computes session dates once for the frame instead of rebuilding a
+  `DatetimeIndex` per bar (was 25% of runtime).
+
+### Added
+
+- `regime.evaluate.null_entry_rate` — replays the detector over simulated
+  driftless random walks, where every entry is false by construction.
+- `regime.evaluate.describe_entries` — signed move around each entry in
+  random-walk units, splitting "the move it is describing" (negative offsets)
+  from "a forecast claim" (positive offsets).
+
+### Fixed
+
+- `evaluate_regime` raises on an empty event table instead of returning a frame
+  of NaNs. On IEX, QQQ drops ~4 minutes a session, so `detect_trend_events`
+  could silently score zero bars and a whole delay/FAR grid came back NaN.
+
+### Removed
+
+- `er_min_entry`, `er_min_hold`, `exit_z`, and the `er` / `signed_er` snapshot
+  columns.
+
+### Validation
+
+- 34 tests in `tests/unit/test_kalman_cusum.py` (537 repo-wide, all passing),
+  including: `slope_rw_std` against Monte Carlo; `slope_z` standard normal on
+  simulated random walks (sd 1.00 +/- 0.15, `P(|z|>2)` 0.046 +/- 0.03);
+  `E[ER_n*sqrt(n)] = 1` at n = 5, 10, 20, 40; a null false-entry ceiling per
+  preset; the weaken flag releasing; the weaken path never reaching the
+  opposite state; `exit_margin` monotone in stickiness.
+- Measured on AAPL/NVDA/TSLA/QQQ/JPM, 2026-06-01 -> 2026-08-01, balanced:
+  flips/session 57.6 -> 5.4, mean trend duration 5.0 -> 9.2 bars,
+  `slope_z` sd 1.44-2.03 -> 1.03-1.07 across symbols.
+  At entry the previous 10 bars have moved +1.78 sigma in the declared
+  direction (100% of entries); the following 5-30 bars move +/-0.04 sigma with
+  `frac_right_way` 0.46-0.52 — the state describes, it does not forecast.
+
+## 2026-09-11 (regime-anchored ER and weaken-and-tighten)
+
+### Changed
+
+- After FLAT→UP/DOWN (or a hard reversal), Kaufman ER no longer mixes bars from
+  before the current regime. Kalman slope is *not* reset. If `slope_z` fades
+  below `weaken_z` or `weaken_frac` of the post-entry peak, the ER lookback
+  shrinks to `er_tighten_window`. A recent against-path with `er >=
+  er_min_hold` flips to the opposite trend; a messy window (`er <
+  er_min_hold`) goes FLAT. Snapshot adds `signed_er` and `weakened`. Disable
+  with `anchor_er_to_regime=False`.
+
+### Validation
+
+- Existing Kalman–CUSUM tests plus: in-trend ER ignores the pre-trend path;
+  a faded UP plus a recent down path flips DOWN even when `exit_z` /
+  `reversal_h` cannot fire; a faded UP plus chop goes FLAT; a single adverse
+  bar still does not exit.
+
+## 2026-09-10 (Kalman–CUSUM online regime detector)
+
+### Added
+
+- `qtrader.regime` — first regime-layer module (ADR-0009).
+  `KalmanCUSUMRegimeDetector.update(bar)` / `.run(df)`: session-anchored
+  local-linear-trend Kalman filter → `slope_z` (or vol-normalized slope) →
+  two-sided CUSUM → ER gate → FLAT/UP/DOWN with hysteresis and hard reversal.
+  Strictly causal; no smoother. Presets `sensitive` / `balanced` /
+  `conservative` are initial defaults, not a fit.
+- `qtrader.regime.evaluate` — detection delay, false alarms, flip rate,
+  capture ratio, mean regime duration. Labels may look ahead; they do not
+  enter the filter. `delay_far_grid` sweeps a parameter cell onto that curve.
+- `qtrader.viz.regime.plot_regime` / `plot_delay_far` (plotly; same
+  candlestick / range-break helpers as `price_chart`).
+- `replay_symbol` loads via `load_clean_bars` (same clean 1-minute store).
+
+### Changed
+
+- Regime charts no longer use matplotlib. `plot_regime` follows
+  `price_chart` (candles, volume, exchange-local range-breaks) and writes
+  HTML if a path is given.
+
+### Validation
+
+- 18 unit tests: no-lookahead (future prices cannot move past states),
+  `run` equals sequential `update`, noiseless slope recovery, CUSUM
+  non-negative, conservative chop stays FLAT, one-bar dip does not exit UP,
+  UP→DOWN reversal skips FLAT, overnight gap does not fire the next open,
+  planted-trend delay, plotly layout smoke.
+- QQQ IEX 1-minute smoke (2026-08-17 → 2026-09-08, 16 sessions, 8
+  `trend_events` labels): balanced mean delay 8.6 bars, capture 8/8,
+  ~16 labelled-FAR/session (the label is a strict 30-minute trend; most
+  detector entries are shorter moves). Flip rate and duration are the honest
+  twitchiness scores: balanced ~32 flips/session, mean trend run ~11 bars.
+  Charts: `results/kalman_cusum/`.
+
+## 2026-09-10 (audit of the trend-precursor test; a second design)
+
+### Added
+
+- `experiments/trend_lift.py` — two designs with no control pool:
+  `unconditional_lift` (every bar is a sample, the base rate is the real one)
+  and `hard_negative_contrast` (among bars that already look like a breakout,
+  what separates the runners). Six tests, including a **planted-signal control**
+  (a synthetic precursor must be recovered at AUC > 0.9, so a null means
+  something) and a pure-noise control.
+- `docs/research/R33-trend-precursor-audit.md`.
+
+### Findings
+
+- **The labelling is clean.** `sigma` uses `<= t`, everything else the open
+  interval `(t, t+H]`, the factor ends at or before `close[t-1]`, and the
+  bootstrap resamples by session. Factor and label share no bar.
+- **The defect is the control pool, not the labels.** `_eligible_controls`
+  removes every bar within 30 minutes of *any* event, so controls are drawn by
+  construction from the quiet parts of the day — selection on the outcome. It
+  did not create a false positive: the existing run is already null (median
+  directional AUC **0.424**, median top-decile lift **0.82**).
+- **Comparing against random times would be worse**, not better: unmatched
+  controls mostly measure "trends happen when the market is active".
+- **Unconditional design**: 106,629 bars, 187 events, base rate **1 in 570**.
+  AUC 0.448-0.509 (median 0.478); top-decile lift median **0.88**.
+- **Nothing is elevated before a Trend Start.** |mom_5|, realised vol, bar
+  range, vol ratio and volume ratio all have event/other ratios of **0.91-0.97**
+  — five unrelated families all pointing slightly the *other* way.
+- **Hard negatives**: bars in the top decile of |mom_5| start a trend at
+  **0.76x** the base rate, and stacking volatility filters takes it to 0.36x.
+  A breakout-looking bar is *less* likely to start a trend than a random one.
+- **The anchor hypothesis was tested and rejected**: `candidate_run_length` has
+  median 1 (p90 3), and relaxing the target to "starts within the next K bars"
+  leaves every AUC in 0.45-0.53 for K up to 20.
+- **The binding constraint is power.** At 187 events the smallest detectable AUC
+  is **0.572**; at 4,000 it is 0.516. One symbol cannot answer this question.
+
+### Next
+
+- Run the collector over the full 22-symbol universe (one config change) before
+  refining anything else.
+- Test compression rather than momentum: `P(trend start | inside a tracked
+  consolidation box, close near an edge)` against the 1-in-570 base rate, using
+  the causal detector already wired in via `experiments/consolidation_gate.py`.
+
+### Validation
+
+- 477 unit tests pass; 6 new. Nothing in `trend_precursor.py` or `labels/` was
+  changed — this is an audit plus a second design, not a replacement.
+
+## 2026-09-10 (trend precursor test)
+
+### Added
+- `qtrader.features.lookback.log_momentum`: `log(close_t / close_{t-N})` only
+  when the lookback is an exact same-session clock span.
+- `experiments/trend_precursor.py`: 5 TOD-matched controls per Trend Start,
+  directional momentum, Cohen's d / rank corr / AUC, decile lift, day-block
+  bootstrap (500), event-time and AUC-heatmap PNGs. Not a model, not a search.
+- Notebook: `notebooks/exploratory_only/trend_precursor.ipynb`.
+
+### Validation
+- Unit tests: future closes do not move `mom_N`; overnight gap is not a
+  5-minute return; event-bar close is not in any factor; controls sit outside
+  the 30-minute exclusion window; seed 42 is deterministic.
+
+## 2026-09-09l (trend charts stay on the event's session)
+
+### Fixed
+- Trend audit charts clip the candle window to the event's session. A 15:20
+  event no longer pulls Monday's open onto the axis (title Sep 4, x-axis
+  Sep 7–8).
+
+### Validation
+- Unit test: Friday 15:20 chart x-values are all 2026-09-04.
+
+## 2026-09-09k (opening reversal is more than the first close)
+
+### Changed
+- `require_first_bar_aligned` now rejects a path that goes against `close_t`
+  by more than it has already led. A one-tick first close then a dip through
+  the start (QQQ 2026-08-04 12:38) is no longer an UP event.
+- Audit charts put the start line at bar *end* (`trend_start`), so the
+  start candle itself stays in the grey pre-window.
+
+### Validation
+- Unit test: a +1 tick lead then a larger dip is a candidate only with the
+  flag off.
+
+## 2026-09-09j (no initial reversal on trend labels)
+
+### Changed
+- Trend candidates now require the first future bar to already move in the
+  labelled direction (`require_first_bar_aligned`, default on). A DOWN
+  window may not open with an up bar (QQQ 2026-08-20 13:45). Later MAE
+  inside the window is unchanged.
+
+### Validation
+- Unit tests: a bounce-then-dump bar is a candidate only with the flag off;
+  every remaining candidate has `sign(first_return) == direction`.
+
+## 2026-09-09i (trend cooldown from run end; chart header)
+
+### Changed
+- Same-direction cooldown now starts after the **last** candidate in a run,
+  not the Trend Start. One slow grind is no longer re-sliced every H minutes
+  (QQQ 2026-08-04 had 12:38 then 13:10 on the same climb).
+- Trend audit charts drop the Plotly legend, give the two-line title more
+  top margin, and pin `start` / `t+H` labels to the price axis.
+
+### Validation
+- New unit test: a same-direction candidate 17 bars after an 8-bar run is
+  not a second event when cooldown is 20.
+
+## 2026-09-09h (minute-level trend event detector)
+
+### Added
+- `qtrader.labels.trend_events`: V1 heuristic labels for a clean H-minute
+  trend (`ZTrend`, ER, MAE/MFE). `sigma_t` is causal and does not cross a
+  session or a missing minute. Consecutive candidates collapse to one Trend
+  Start; opposite-direction conflicts are kept and flagged.
+- `experiments/trend_collect.py` + `viz/trend_events.py`: tables, summary,
+  strongest/random/borderline HTML, overview page.
+- `notebooks/exploratory_only/trend_collect.ipynb` is the thin caller.
+
+### Validation
+- 10 unit tests: monotone up/down, chop rejected, future prices do not move
+  `sigma_t`, a candidate run is one event, overnight gap is not a 1-minute
+  return, charts mark start and t+H.
+- Smoke: QQQ 2026-09-01..05, 29 candidates → 2 events, artifacts written.
+
+## 2026-09-09g (index_momentum was scratching)
+
+### Changed
+- `index_momentum` no longer time-stops. Entry 1.5 / exit 0.0, fade only after
+  10 bars, 15-bar re-entry cooldown. QQQ 2026-09-03 had 13 round trips
+  (median hold 10 min, two 1–2 minute scratches) because score std is ~1,
+  the old 1.0/0.3 band was narrower than the noise, and flatten allowed
+  the next bar back in.
+
+### Validation
+- 13 unit tests pass, including: a clean rally is one hold; a time-stop plus
+  cooldown leaves an 8-bar flat gap.
+- Smoke: QQQ 2026-09-03, 13 trades → 4 (holds 62/3/25/93 min). The remaining
+  3-minute round trip is the ATR stop, which is allowed to fire before
+  `min_holding_bars`.
+
+## 2026-09-09f (session return on the factor chart)
+
+### Added
+- `price_chart(..., return_panel=True)` draws a last row: this symbol's
+  buy-and-hold return vs the strategy's net return, both rebased to the
+  charted window. Off by default. `factor.ipynb` turns it on.
+
+### Validation
+- `test_return_panel_sits_below_the_score`: extra y4, score y5, return y6.
+
+## 2026-09-09e (index own-path factors)
+
+### Added
+- `index_momentum`: six directional factors from the index's own path
+  (`session_z`, `ewma_z`, `ret_5_z`, `ret_15_z`, `vwap_z`, `macd_z`), averaged
+  by `combine_score` with no cross-sectional z-score. `rvol` is a gate, not a
+  vote. Config `config/backtest/index_momentum_1min.yaml` on `broad_index`.
+- `factor.ipynb` now loads that config so a single index still has a finite
+  score.
+
+### Why
+- A cross-sectional z-score is undefined at N=1 and, on two index ETFs, removes
+  the market-common move the strategy is trying to trade.
+
+### Validation
+- 11 unit tests: truncation / future-perturbation invariance; a peer's path
+  cannot move this name's score; N=1 still has a finite score; VWAP term is on
+  the same scale as `session_z`.
+- Smoke: SessionLab QQQ 2026-09-01, 390 bars, `score` count 389, std 1.06
+  (not dominated by VWAP), 14 trades.
+
+## 2026-09-09d (z-scores were NaN because the book was stale)
+
+### Fixed
+- `ensure_bars` treated any overlap with the warmup window as coverage. On
+  2026-09-01 only QQQ/SPY/EWJ had been gap-filled; the 22 names still ended
+  2026-08-26. Cross-sectional N=1, so every z-score was NaN (`std` of one
+  point). It now requires the **target session** on every name and tail-fills.
+- `gross_bps` / `hit_rate` are still NaN when that symbol had zero trades
+  that day — that is the summary of an empty book, not a factor bug.
+
+### Validation
+- 22 ingest/session_lab tests pass.
+- QQQ 2026-09-01 after the fill: median eligible N=14, `z_ret_1m` count 389.
+
+## 2026-09-09c (SessionLab downloads missing bars)
+
+### Added
+- `SessionLab` adds a symbol that is not in the config universe, and downloads
+  it when the local store does not cover the lab window. The only hard error is
+  `UnknownSymbolError` — Alpaca does not list the name.
+- `Nikkei` / `N225` / `NKY` resolve to `EWJ` (iShares MSCI Japan). Alpaca has
+  no Nikkei 225 listing; `JPXN` (JPX-Nikkei 400) is the name match but IEX
+  prints it a few times a day, so it is not used as a minute series.
+- Two years of `QQQ` (gap-fill to 2026-09-09) and `EWJ` 1-minute and 5-minute
+  bars on IEX.
+
+### Validation
+- 29 unit tests on ingest / universe / session_lab.
+- Smoke: `SessionLab(..., "Nikkei", "2026-04-08")` → `EWJ`, 78 five-minute bars.
+- Store: QQQ 1Min 250,398 bars to 2026-09-09; EWJ 1Min 129,029 bars from 2024-09-09.
+
+## 2026-09-09b (xsec factor session chart)
+
+### Added
+- `price_chart(..., extra_panel=)` overlays named indicator columns on a new
+  row immediately below MACD. Default reports do not pass it.
+- `notebooks/exploratory_only/factor.ipynb` loads any session the same way
+  `session_lab` does and charts the eight `xsec_momentum` z-scores against that
+  day's bars.
+
+### Validation
+- 13 `test_charts` tests pass, including overlay row placement (MACD y3,
+  factors y4, score y5).
+- Smoke: AAPL 2026-04-08, all eight `z_*` columns published, ~390 bars.
+
+## 2026-09-09 (the negative gross is the sign, not the factor definitions)
+
+### Findings
+
+- **The rule is executing the signal faithfully.** Panel, tradeable window at
+  the realised 7-bar median hold: the long gate region (`score > +1.5`) earns
+  **-0.37 bps**, the short gate region (`score < -1.5`) earns **+0.74**, so the
+  predicted combined gross is **-0.55**. Realised was **-0.56** (LONG -0.08 on
+  3,137, SHORT -1.06 on 2,978). Nothing is leaking in the thresholds, exits,
+  stop or book.
+- **The effect strengthens in the tail, which a badly defined factor does not
+  do.** Mean return in the score's own direction by magnitude: |score| 0.5-1.0
+  **-0.06 bps**, 1.0-1.5 **-0.25**, 2.0-3.0 **-2.72** — 45x stronger, on
+  4,560 observations. The +/-1.5 entry gate selects exactly where the factors
+  are most reliably inverted.
+- **Flipping the signed weights confirms it in both windows.** Hit rate moves
+  0.361 -> 0.546 immediately. Restricted to |score| > 2.0 (the region the panel
+  identified) gross turns positive: **+0.53 bps on m5_mine and +0.78 on
+  m5_test** — the first positive gross this score has produced, predicted by the
+  panel before it was backtested.
+- **Still not tradeable**: +0.78 bps against a 3.00 bps round trip, net -2.22.
+- A fitted holding period does not survive: `flipped, >2.0, hold 7` reads
+  **+1.43 bps on m5_mine and -0.45 on m5_test**. The threshold came from the
+  panel and replicates; the hold came from m5_mine's own realised median and
+  does not.
+- Interpretation: these are **short-horizon price-impact detectors**, not trend
+  detectors. `ret_5m` inverts perfectly (Spearman -1.000) because a name that
+  just moved relative to its peers has usually absorbed an order. The seven
+  price factors correlating 0.45 on average (R31) are seven lenses on the same
+  event voting seven times.
+
+### Added
+
+- `docs/research/R32-the-sign-not-the-factors.md`.
+
+### Validation
+
+- 423 unit tests pass; no production code changed (every arm is a config
+  override). Nothing promoted: the flipped configuration is a mining-split
+  observation that replicated once, and m5_test already carries enough trials
+  that a fresh window is needed.
+
+## 2026-09-08g (R31 audit: four real defects in xsec_momentum, fixed)
+
+### Fixed
+
+- **The short rank gate was unreachable.** `cross_sectional_rank` returns
+  `rank / N`, whose floor is `1/N`, not 0. The median bar has **9** eligible
+  symbols, so the floor was 0.111 against a `rank_short < 0.05` gate, and only
+  **0.91%** of bars had N > 20. Realised: **3,382 longs against 84 shorts** — a
+  long-biased rule, not a symmetric cross-section. Added
+  `ranks.cross_sectional_percentile`, which spans [0, 1] so the two gates mirror.
+- **Trailing windows reached into yesterday.** `bar_log_returns` zeroes the
+  overnight gap, which hid that a 15-bar window at 09:35 is still built mostly
+  from yesterday's last bars: **91.9%** of bars 5-13 of a session carried a
+  finite 15-bar return that a session-reset window makes NaN.
+  `trailing_return` now takes `restart`, and the strategy passes it.
+- **The RVOL numerator did not reset either**; `seasonal_volume_ratio` now
+  groups its rolling mean by session.
+- **RVOL carried a positive weight in a signed score.** It is unsigned — large
+  whether price rose or fell — so it pushed every busy symbol towards "long".
+  It is now refused as a weight (`UNSIGNED_FACTORS`) and enters as `min_rvol_z`,
+  a gate applied to both sides equally.
+- **The ten-minute open blackout was not in force.** `no_entry_before: 09:35`
+  was copied from a 5-minute config; on a 1-minute grid it means a 09:36 fill,
+  and **246 trades (7.1%)** filled before 09:41. Now 09:40.
+- `setup_features` derived its column names from `FACTORS` and failed once a
+  factor stopped carrying a weight; it now reads what was actually published.
+
+### Changed
+
+- `score_monotonicity` reports a **`tradeable_*`** column measured from the next
+  bar's open alongside `fwd_*` from the decision close. The gap between them is
+  not a rounding detail: **58%** of this score's 5-minute decile spread accrues
+  before a fill can reach it.
+
+### Findings
+
+- Post-fix, from the decision close the ladder is unchanged (Spearman -0.988 /
+  -0.915 / -0.988 at 5/15/30 min). **From the next open it is -0.782 / -0.212 /
+  -0.673 with a top-minus-bottom of -0.45 / -0.21 / -0.27 bps** against a
+  **3.00 bps** round trip. The reversal is real and roughly a seventh of the toll.
+- R30's headline overstated the effect by ~2.4x by measuring from a price no
+  order could reach, and described as a symmetric long/short test something that
+  took 40 longs for every short.
+- **Post-fix backtest (m5_mine).** The book is symmetric and the blackout binds:
+
+  | arm | n | LONG | SHORT | gross | net | return | fills < 09:41 |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+  | fixed | 6,115 | 3,137 | 2,978 | -0.56 | -3.56 | -33.87% | **0** |
+  | fixed + vol-normalised | 5,432 | 2,785 | 2,647 | -0.36 | -3.36 | -28.97% | 0 |
+
+  Worse than the broken version (-19.26%), and expected: the rule now actually
+  takes the short side, and the ladder says the sign is inverted, so shorting
+  the bottom bucket is the wrong side of a real effect. The audit's
+  volatility-normalised gross of +0.51 bps/trade did **not** reproduce here
+  (-0.36); the two runs must differ in some other respect and that is worth
+  reconciling before either number is quoted.
+
+### Scope correction
+
+- **Cross-sectional standardisation removes whatever the universe does in
+  common.** A day on which every name rises leaves this score unmoved by
+  construction, so nothing measured here can confirm or refute market-level
+  time-series momentum. R30 did not say so; the config now does.
+
+### Validation
+
+- 423 unit tests pass; 7 new pinning each defect: the short gate is reachable at
+  N=9, a single eligible symbol has no percentile, both gates admit end to end,
+  a trailing window does not cross a session boundary, an unsigned factor cannot
+  carry a weight, the volume gate narrows both sides, and the bucket table
+  reports the tradeable window.
+
+## 2026-09-08 (audit of `xsec_momentum`)
+
+### Findings
+
+- Added `docs/research/R31-xsec-momentum-audit.md`. The 5% lower percentile gate
+  is almost always unreachable because pandas ranks start at `1/N` and the
+  effective eligible universe has median `N=9`; the reported book is 3,382
+  longs versus 84 shorts, not a symmetric long/short test.
+- About 0.75 bps of the headline 1.35 bps five-minute reversal occurs before
+  the next-open fill. The executable remainder is about 0.62 bps against a 3.00
+  bps round trip.
+- Documented further semantic gaps: momentum windows cross sessions near the
+  open, unsigned RVOL is added as a long-direction vote, seven price inputs are
+  redundant, the nominal 22-name universe is effectively only nine names per
+  minute, and the configured strategy violates the ten-minute opening blackout.
+- A symmetric-rank diagnostic remains negative gross. The implementation defects
+  invalidate the original interpretation but do not conceal a profitable edge.
+- Volatility-normalising the return factors turns gross positive (+0.51
+  bps/trade with symmetric ranks), but net remains -2.49 bps/trade. This is a
+  useful diagnosis of volatility contamination, not a tradeable result.
+
+## 2026-09-08f (cross-sectional intraday momentum score)
+
+### Added
+
+- `strategies/xsec_momentum.py` — eight factors per symbol per minute
+  (`ret_1m/5m/15m/30m`, `vwap_deviation`, `relative_ret_15m`, `rvol_5m`,
+  `er_15m`), each cross-sectionally z-scored, weighted into one score, and
+  ranked cross-sectionally. Entry needs score AND rank extreme; exits are the
+  score fading, an ATR stop, a holding limit, or the session close. A reversal
+  closes without flipping on the same bar, and nothing is held overnight.
+- `features/efficiency.py` — Kaufman efficiency ratio (and a signed variant),
+  session-bounded so the overnight gap never lands in the numerator.
+- `seasonality.seasonal_volume_ratio` — RVOL against the same minute of
+  completed prior sessions, so the intraday volume U-shape is not read as
+  signal.
+- `features/score.py` — weighted cross-sectional combination that skips missing
+  factors rather than scoring them as average, with a `min_factors` floor.
+- `analysis/score_monotonicity.py` and `scripts/score_monotonicity.py` — bucket
+  every (bar, symbol) score against forward 5/15/30-minute returns.
+- `config/backtest/xsec_momentum_1min.yaml`.
+
+### Findings
+
+- **The score is strongly monotone and inverted.** Spearman between decile and
+  forward return: **-0.988 at 5 min**, -0.818 at 15, -0.855 at 30, on **118,826
+  observations per bucket**. Hit rate falls monotonically 0.507 -> 0.477. Top
+  minus bottom is **-1.26 bps at 5 min**.
+- **Every return factor inverts; the one volume factor does not.** `z_ret_5m`
+  Spearman **-1.000** at 5 min; `z_ret_1m` -0.988; `z_relative_ret_15m` -0.988;
+  `z_er_15m` -0.806; `z_vwap_deviation` -0.539. `z_rvol_5m` is **+0.285** and
+  gone by 15 minutes.
+- **Inverting the weights confirms the sign and still does not pay**: hit rate
+  0.369 -> **0.539**, but gross only reaches -0.03 bps/trade and the decile
+  spread driving it is 1.26 bps against a **3.00 bps** round trip.
+- Same conclusion as R04/R05 (intraday momentum wrong-signed, rank IC -0.023),
+  now with a ten-rung monotone ladder behind it rather than one correlation.
+- **Caveat:** m5_validate produced 16-21 trades against m5_mine's 3,466 — a
+  1-minute data coverage gap in that window, not a result.
+
+### Validation
+
+- 416 unit tests pass; 29 new. Leakage first: truncation invariance and future
+  perturbation invariance on both the score and the weights; then the factor
+  contracts (ER is 1 for a line and 0 for a round trip, signed ER separates a
+  fall from a rally, no window crosses a session boundary, RVOL compares like
+  minute with like minute), the missing-factor policy, and the state machine
+  (rank gate alone can hold the book flat, fade exit, holding limit, no same-bar
+  reversal, book capacity, gross <= 1, nothing held into the close, a new
+  session starts flat).
+
+## 2026-09-08e (the corrected momentum estimator is worse)
+
+### Findings
+
+- **No fixed-span EWMA beats the `session` estimator.** Wide exit, no hard stop,
+  only the estimator varying. m5_mine/m5_validate/m5_test returns:
+  `session` **-1.24% / +1.64% / +1.47%**; ewma span 3 -3.55/-3.09/-0.18;
+  span 6 -6.68/-1.67/-5.40; span 12 -2.60/-4.16/-3.42; span 24
+  -0.34/+0.25/-0.63. The ordering among spans 3-12 is noise; the signal is that
+  the growing-window estimator wins and **the best fixed span is the longest**.
+- Risk does not improve either: worst trade with ewma span 6 is **-866 bps** on
+  m5_validate against -648 for `session`.
+- **Coherent with R04/R05**, which measured intraday momentum as reliably
+  wrong-signed (rank IC -0.023, t = -11.2). `session` is not a momentum
+  estimator — its numerator is `log(close/open)`, i.e. distance from the open —
+  so replacing it with a genuine short-horizon read moves the gate toward the
+  statistic measured to be inverted. **The name was wrong; the quantity was
+  doing useful work under a wrong name.**
+- Trade counts move ~1% (2029 -> 2053, 1058 -> 1069) while returns swing 7
+  points: the estimator swaps *which* candidates fire at the margin and the
+  binding book cascades that (R23 §2). Count is not membership.
+- **All three defects found from one chart were load-bearing**: capping the
+  gap-inflated stop removes the return (R28), lifting the held-symbol blindness
+  does nothing, and correcting the momentum label makes it worse. The apparent
+  profit lives in the defects because the signal underneath has no information.
+
+### Findings (continued — the decomposition)
+
+- **Only 57% of the two arms' books are shared** (604 of ~1060 on m5_test).
+  Trades taken only by `session` are worth **+5.94 bps**; those taken only by
+  `ewma(6)` are worth **-4.91**. The estimator swaps ~450 good trades for ~450
+  bad ones — an 11 bps swing on 43% of the book, which is the entire result.
+- **All the gross edge is in the longs, and `session`'s longs are 3x better**:
+  LONG +10.18 (session) vs +3.46 (ewma6); SHORT -2.67 vs -4.81.
+- The reason is what `session` gates on: `z > +0.25` means `log(close/open)` is
+  meaningfully positive, i.e. **the stock is up on the day**. The profitable
+  component is a day-level relative-strength condition, not momentum in any
+  timeframe — and it has been travelling under the name `momentum_z` since R01.
+
+### Added
+
+- `docs/research/R29-the-corrected-momentum-estimator.md`.
+
+### Validation
+
+- 387 unit tests pass; no production code changed (all arms are config
+  overrides). No committed configuration changes.
+
+## 2026-09-08d (hard stop, live tracking, and the momentum definition)
+
+### Added
+
+- `SRMomentumStrategy.hard_stop_bps` — a ceiling on the initial loss applied
+  **after** the sigma stop and the ATR cap, so it binds whatever they produce
+  and no volatility reading can lift it. `min(2*sigma_H, 2*ATR, 150 bps)`.
+- `SRMomentumStrategy.track_breaks_while_held` — lifts the `position == FLAT`
+  gate in `_track_break`, so the level machine keeps running under an open
+  position. Both default to off; no existing result changes.
+
+### Findings
+
+- **`momentum_z` was measuring distance from the session open, not momentum.**
+  The config never set `momentum_estimator`, so it defaulted to `session`:
+  `z = sum(r since open)/(sigma*sqrt(n))`, whose numerator is `log(close/open)`.
+  Its sign is the sign of `close - open` on **78% of bars**. On AMD 2026-06-29
+  it read **-1.01 at 11:00** while `ewma(6)` read **+0.69** and had turned
+  positive at 10:30 — which is what the chart shows. The EWMA estimator was
+  already implemented and simply not selected.
+- **The hard stop works precisely.** Worst single trade across the three
+  windows: -643/-648/-711 (R25/R26 wide) -> **-237/-232/-245**; trades below
+  -200 bps: 95/58/56 -> **6/7/4**, better than the pre-R25 configuration
+  (9/12/8). The AMD trade goes -490 -> -198 bps.
+- **And it removes the positive return.** m5_test +1.47% -> **-3.71%**. This
+  confirms R27 exactly: the wide exit's return WAS the left tail, and there is
+  no version of it that is both positive and risk-controlled.
+- Capping single-trade losses barely moves the drawdown (-7.7% -> -7.5% on
+  m5_test) — the drawdown is an accumulated negative expectation, not a few
+  disasters.
+- Live tracking raises setups seen on m5_test from 1,497 to 1,764; returns do
+  not improve.
+
+### Validation
+
+- 387 unit tests pass; 6 new (the hard stop binds a 314 bps sigma to 150 bps,
+  never widens a tighter stop, composes with the ATR cap to the tighter of the
+  two, rejects a non-positive value; a held symbol goes blind by default and
+  keeps forming breaks with tracking on).
+
+## 2026-09-08c (the AMD short that never stopped — R25's result is short volatility)
+
+### Findings
+
+- **Why the AMD 2026-06-29 short never stopped.** σ_H at the 10:00 decision bar
+  is **314 bps** (gap-down open; the same name reads 88-106 bps four hours
+  later). With `stop_sigmas: 2.0` and no ATR cap the initial stop sits at
+  **544.91 — 32.2 points away, 2.8 points above the session high**. Nothing
+  malfunctioned; the geometry did what it was configured to do. With
+  `initial_stop_atr: 2.0` restored the same trade exits at 523.0 for **-198 bps
+  instead of -490**.
+- **Why no long during the rally.** `watched_level` is NaN on every bar after
+  the entry: `_track_break` registers breaks only while the symbol is FLAT
+  unless `exit_on_opposite_signal` or `allow_add_back` is on. The 29-point rally
+  was structurally invisible — the long was never evaluated, not rejected.
+  Enabling `exit_on_opposite_signal` does NOT fix it (still -490 bps):
+  `momentum_z` stays negative until 13:00 and clears +0.25 only at 13:15, at
+  price 537.
+- **The result that qualifies R25 and R26.** Over m5_test: the wide exit gives
+  gross +3.98 / net +0.98 / return +1.47%, but **worst trade -711 bps and 56
+  trades below -200 bps**, against **-273 and 8** for the original tight config.
+  Restoring the ATR cap on top of the wide trail is worse than the original
+  (-4.40% vs -1.36%), so the return and the fat left tail are the same
+  mechanism. At `max_weight: 0.15` a -711 bps trade is ~-1.07% of equity.
+- R25 §1's MFE measurement stands; what was missing was the shape of the
+  distribution behind the improvement. Same failure mode as R24 from the
+  opposite direction: there a mechanism cut the right tail, here it grows the
+  left one.
+
+### Added
+
+- `docs/research/R27-the-amd-short-that-never-stopped.md`; R25 and R26 annotated
+  in place so neither can be read without it.
+
+### Next
+
+- Cap the volatility estimate itself (σ_H against its own trailing session
+  median) rather than capping the stop with a second volatility measure, then
+  re-run R25 §3.
+- Report `worst trade` and `count < -200 bps` in every future arm table.
+
+## 2026-09-08b (galleries show the consolidation box and the gate readings)
+
+### Added
+
+- `setup_gallery(..., ranges=...)` shades every consolidation box the
+  market_state detector was tracking inside a panel's window — one rectangle per
+  `range_id`, at the high/low it had frozen, drawn from the detector's own state
+  rather than recomputed, so the picture is what the gate actually saw.
+- Each panel title now carries the gate readings **at the decision bar**
+  (momentum z, relative volume, horizon sigma, acceptance count, VWAP side) —
+  what the entry rule tested, one bar before the fill.
+- `scripts/plot_setups.py --ranges`. It refuses to run on a non-5-minute panel,
+  because the detector's thresholds are stated in 5-minute bars and boxes drawn
+  from another series would be a plausible-looking lie.
+
+### Validation
+
+- 381 unit tests pass; 5 new on the boxes (own high/low, one rectangle per
+  range_id, a symbol with no range data still renders, omitting `ranges` leaves
+  the panel byte-identical) and 1 on the title readings.
+- Rendered `results/sr_momentum_ml12__m5_test__trail_sigmas3.5_stop_sigmas2.0_initial_stop_atrNone/setups_wide_exit.html`:
+  10 winners and 10 losers over m5_test with the wide-exit geometry, 94 boxes
+  drawn across the 20 panels.
+
+## 2026-09-08 (per-symbol exit widths: rejected; the one-parameter version is positive)
+
+### Added
+
+- `stop_sigmas` / `trail_sigmas` accept a `{symbol: width}` mapping as well as a
+  float. A mapping must carry its own `"default"`, so a symbol the fit never saw
+  cannot silently inherit the class default; `trail >= stop` is now checked
+  symbol by symbol rather than by extremes.
+- `docs/research/R26-per-symbol-exit-width.md`.
+
+### Findings
+
+- **The per-symbol exit optimum is noise.** Fitted on m5_mine over a six-point
+  grid and compared with the same fit on m5_validate: the argmax agrees for
+  **1 of 12** symbols (chance is 2), mean curve correlation across windows is
+  **-0.202**, and the rank correlation of the fitted optimum is **+0.000**.
+- Out of sample the fit beats the single global width on m5_test (+3.22% vs
+  +1.47%) and loses on m5_validate (+0.54% vs +1.64%). **Twelve fitted
+  parameters do not beat one.**
+- **The one-parameter wide exit is net positive on both later windows** at the
+  full 3.00 bps cost: m5_validate **+1.64%** (net +0.79 bps/trade), m5_test
+  **+1.47%** (+0.98). m5_mine remains -1.24%. First positive out-of-sample
+  result in this project.
+- Read against context, not in isolation: ~+2.2%/year, below T-bills and far
+  below the +24% R20 measured for holding the indices; and R25 §4 still has the
+  same parameters failing on 2 of 6 out-of-universe cells.
+
+### Validation
+
+- 376 unit tests pass (6 new: scalar behaviour unchanged, a mapping must name
+  its default, a named width binds, an unnamed symbol takes the default,
+  per-symbol trail/stop ordering, positivity).
+- Three trials appended to `results/search/ledger.jsonl`, verdict REJECTED.
+  m5_test now carries 8 trials, m5_validate 7, m5_mine 44.
+
+## 2026-09-07e (the exits are too tight — the first mechanism that improves gross)
+
+### Findings
+
+- **The average LOSING trade is up +34 to +39 bps before it ends at -52**, in
+  all three windows (MFE +34.1/+35.4/+38.6 against gross -52.2/-51.9/-56.1).
+  Winners keep 0.61-0.63 of their best. `corr(hold_bars, gross)` is +0.46 to
+  +0.59, so the problem is not holding too long.
+- **Tightening the exit raises the hit rate and destroys the return.**
+  `max_giveback` 0.3 lifts hit rate to 0.484/0.479/0.492 from 0.368/0.354/0.387
+  while return falls to -14.19%/-3.89%/-5.25% from -7.95%/-4.23%/-1.36%, and the
+  trade count RISES (3153 -> 3949) as capped trades re-open. R24 §1 shown
+  causally: hit-rate-raising mechanisms cut the right tail, and the tail is the
+  P&L.
+- **Widening the exit improves every metric in every window** on ml12
+  (`trail_sigmas` 3.5, `stop_sigmas` 2.0, `initial_stop_atr` removed): return
+  -7.95%/-4.23%/-1.36% -> **-1.24%/+1.64%/+1.47%**; gross +1.11/+1.56/+2.38 ->
+  **+2.55/+3.79/+3.98**; hit 0.368/0.354/0.387 -> 0.492/0.473/0.494; and the
+  top-5 share of gross FALLS 86%/193%/85% -> 61%/121%/77%.
+- **It does not fully replicate out of universe.** Hit rate rises in 9/9
+  universe-window cells and the trade count roughly halves everywhere, but gross
+  improves in only 3 of 6 out-of-universe cells, worsens in 2 (SPY+QQQ m5_test
+  +0.74 -> -1.24; us_liquid_22 m5_validate +0.21 -> -1.53) and is flat in 1.
+- Two hypotheses rejected first: sizing proportional to sigma (sign flips on
+  m5_mine) and capping the give-back (above).
+- The 2-ATR "Turtle-style" initial stop cap does most of the damage; removing it
+  is most of the gain.
+
+### Added
+
+- `docs/research/R25-the-exits-are-too-tight.md`.
+
+### Validation
+
+- Three trials appended to `results/search/ledger.jsonl`, verdict PARTIAL.
+  m5_test now carries 7 trials, m5_validate 6, m5_mine 43.
+- 370 unit tests pass; no production code changed (every arm is a config
+  override of existing parameters).
+
+## 2026-09-07d (conviction-only entries: works mechanically, no edge)
+
+### Findings
+
+- **Screened all 19 setup features against gross return** (book unbound, both
+  later windows, Bonferroni |t| = 3.01). Ten clear it in both windows with the
+  same sign; the strongest are volatility and size (`horizon_sigma_bps` IC
+  -0.220/-0.179). **`momentum_z` ranks worst of the nineteen** (t = +2.65/+0.04).
+- **Rank IC and the mean disagree, and the mean is what compounds.** Mean gross
+  by horizon-sigma quintile RISES (m5_validate -1.78 -> +15.78; m5_test +0.70 ->
+  +5.28) while the rank IC is negative. High-sigma setups lose more often and
+  earn more on average. **Selecting for hit rate selects against expected
+  value.**
+- **No conviction arm is positive in all three windows.** Seven arms swept. The
+  tightest (z>=1.5, rvol>=2.0, acceptance_bars 3, max_positions 1) returns
+  **-3.83% / +2.99% / +3.65%** on m5_mine / m5_validate / m5_test: best on the
+  two windows it was selected on, negative on the largest window it was not.
+- Session-clustered bootstrap on that arm: 95% CI on gross is [-8.6,+11.7],
+  [-7.7,+20.8], [-6.6,+25.4] — all contain zero. **The top 5 trades carry
+  143-379% of total gross in every window**; remove five trades and all three
+  are negative.
+- Hit rate does rise and does replicate (0.354 -> 0.391, 0.387 -> 0.458), which
+  is precisely the wrong thing to optimise given the skew.
+- **Cutting ~90% of trades removes ~90% of the loss.** That is a per-trade
+  expectation which is a small negative constant — a toll, not a signal — and
+  the third independent confirmation of R23 §5. `z1.5 rvol2 accept3` turns
+  -7.95%/-4.23%/-1.36% into **-1.06%/-0.16%/+0.03%**: it stops the bleeding in
+  every window without making money in any.
+
+### Added
+
+- `docs/research/R24-conviction-only-entries.md`.
+
+### Validation
+
+- Three trials appended to `results/search/ledger.jsonl`, all REJECTED.
+  m5_test now carries 6 trials, m5_validate 5, m5_mine 42.
+- 370 unit tests pass (no production code changed; every arm is a config
+  override of existing parameters).
+
+## 2026-09-07c (why the gate did not raise the win rate)
+
+### Added
+
+- `SRMomentumStrategy.veto_consumes_setup` — whether a break seen while vetoed
+  is destroyed (like the opening clock gate) or merely postponed. Defaults to
+  postponing, the behaviour R22's numbers were measured with.
+- `docs/research/R23-why-the-gate-did-not-help.md`.
+
+### Findings
+
+- **The gate does remove bad trades.** Decomposing the two arms on m5_test by
+  (symbol, entry time): 33 baseline trades vanished, averaging **-5.60 bps**;
+  hit rate rose 0.3866 -> 0.3884.
+- **But it is not a subtraction.** 18 trades appeared that the baseline never
+  took, 11 of them the same setup entered later the same session, earning
+  **-27.7 bps** against the trade they replaced. Making the veto consume the
+  setup measured *worse* (gross +2.58 -> +2.37) and produced **more** new trades
+  (18 -> 59): freeing the slot earlier lets the book admit substitutes.
+- **With the book unbound (max_positions 12, full on 0.2% of bars) the gate's
+  entire effect is +0.06 bps and the hit rate does not move.** Everything
+  visible at max_positions 6 was substitution — R17 from a new direction.
+- **The momentum premise does not hold.** Rank IC of momentum z against forward
+  return, inside vs outside a range: m5_validate has outside *more* wrong-signed
+  (-0.021 to -0.027 vs ~0); m5_test has the opposite sign at 12-24 bars
+  (+0.013/+0.016 vs -0.007/-0.010). Sign flips between windows, all |IC| < 0.03.
+- **Two candidate improvements tested and rejected**, each convincing on one
+  split and gone on the other: mid-session-only entries (11:00-14:00: +5.32% on
+  m5_validate, -3.13% on m5_test) and range edges as levels (+2.64 bps t=+3.38
+  vs -0.16 bps t=-0.24).
+- **Cost is what decides this strategy, not signal.** Total return by assumed
+  round trip: m5_validate +2.88% / +1.43% / -0.02% / -1.40% / -4.23% and m5_test
+  +4.34% / +3.26% / +2.09% / +0.99% / -1.36% at 0.50 / 1.00 / 1.50 / 2.00 / 3.00
+  bps. **Positive in both windows at 1.00 bps, negative in both at 3.00.** The
+  twelve names are mega-caps whose midday spread is a penny; the flat 3.00 bps
+  is very likely far too pessimistic there.
+
+### Validation
+
+- 370 unit tests pass (1 new pinning that a consumed setup does not fire while a
+  postponed one does).
+
+## 2026-09-07b (market_state's persistence model as a gate: no tradable edge)
+
+### Added
+
+- `consolidation_gate.persistence_probability` / `persistence_veto` — read
+  market_state's **walk-forward** `predictions_gbdt.parquet` (never the final
+  joblib fit, which saw every row) and veto new entries while P(the box holds
+  the next 6 closes) is above a threshold. NaN means "no box", which is not a
+  veto. The uniform one-bar decision lag is asserted, not assumed.
+- `config/universe/consolidation_ml_12.yaml` and
+  `config/backtest/sr_momentum_ml12_5min.yaml` — the twelve names the model
+  covers out of sample throughout; only the universe and run_id differ from
+  `sr_momentum_5min.yaml`.
+- `docs/research/R22-consolidation-persistence-gate.md`.
+
+### Findings
+
+- **No usable edge.** Best swept threshold (0.60) lifts gross from +0.58/+1.56/
+  +2.38 to +0.83/+1.52/+2.58 bps on last_year/m5_validate/m5_test, against a
+  **3.00 bps** round trip. Every arm in every window is net negative. The
+  winning threshold is a selected maximum over five and is *worse* than baseline
+  on m5_validate.
+- Rank IC of P(hold) against per-trade gross is −0.093 / −0.054 / −0.108 with
+  session-clustered permutation p = 0.252 / 0.287 / 0.331. Correct sign, three
+  times, but only two of the windows are independent and neither is
+  distinguishable from zero (Fisher p ~ 0.32).
+- **Oracle bound.** Substituting the realised label for the prediction —
+  look-ahead, untradable, an upper bound on any model of this target — is worth
+  +1.09 to +1.18 bps of gross. On m5_test that reaches net **+0.47 bps**
+  (+1.01% over eight months); on last_year it is still **−1.24 bps**. The
+  shipped model captures ~20% of the oracle, which is what AUC 0.73 against a
+  0.44 base rate should give: **the ceiling is the problem, not the model.**
+  The oracle's whole margin is smaller than the known 5x error in the flat cost
+  model (C00 §3b) over the session hours where entries concentrate.
+- The rule detector is unchanged upstream: R21's binary gate reproduces exactly.
+
+### Validation
+
+- 369 unit tests pass (3 new pinning that an uncovered bar is not a veto, the
+  threshold semantics, and refusal of predictions with a non-uniform lag).
+- Two trials appended to `results/search/ledger.jsonl`, both REJECTED;
+  m5_test now carries 5 and m5_validate 4.
+
+## 2026-09-07 (a consolidation gate: no entry while price is inside a range)
+
+### Added
+
+- `SRMomentumStrategy.entry_veto` — an opaque `timestamp x symbol` boolean frame
+  that refuses **new** positions. It vetoes openings only; an existing position
+  is still managed and exited normally. The strategy learns nothing about what
+  produced the frame, so any regime detector can be tested as a gate.
+- `qtrader/experiments/consolidation_gate.py` — adapter calling
+  `market_state.structure.consolidation` from the sibling repo. The detector is
+  imported, not copied (ADR-0008); it always runs on the 5-minute series and is
+  carried to a finer decision grid with `align_to_fine`.
+- `scripts/run_consolidation_gate.py` — baseline / gated / complement over one
+  shared panel, plus the baseline's own trades split by detector state.
+- `docs/research/R21-consolidation-gate.md`, `docs/adr/ADR-0008-*`.
+
+### Findings
+
+- **The gate has no discriminating power.** The detector marks 42.3% of bars as
+  in-range. Gating improves total return on both grids (5-min -4.77% -> -4.63%;
+  1-min -1.59% -> -1.01%) but moves the **gross edge per trade** by at most
+  0.08 bps against a 1.50 bps toll. Scaling the baseline loss by the surviving
+  trade count predicts the gated result: -1.59% x 202/303 = -1.06% vs -1.01%
+  measured. It is a way of trading less, not of trading better.
+- **The sign of its apparent selection flips between grids.** Scoring the
+  baseline's own trades by the state at their decision bar: 5-minute grid
+  inside +2.57 bps vs outside -0.52 (Welch t = +0.77); 1-minute grid inside
+  -0.52 vs outside +0.76 (t = -0.46). Session-clustered permutation tests give
+  **p = 0.645** and **p = 0.763**.
+- The most attractive number produced (5-minute `only entry in range`, -0.71%,
+  gross +0.99 bps) is the same statistic as the p = 0.645 cell.
+- Consistent with C00 §3a: a veto is not a subtraction. There is no candidate
+  score with real IC for a filter to concentrate.
+
+### Validation
+
+- 366 unit tests pass, including three pinning that the veto blocks an entry,
+  does not close an open position, and ignores symbols it does not mention; and
+  five pinning the adapter's shape, truncation invariance and the one-bar delay
+  when the mask is carried to a finer grid.
+
+## 2026-09-06 (removed the 3-bar experiment)
+
+### Removed
+
+- `src/qtrader/experiments/three_bar.py`, `tests/unit/test_three_bar.py`,
+  `docs/research/R21-three-bar-audit.md`, and sections 11-12 of
+  `session_lab.ipynb`. The rule was audited to destruction the day before (see
+  the 2026-09-05 entry); nothing else imported it. **These files were never
+  committed, so this deletion is not recoverable from git** — the findings below
+  are the only surviving record.
+- A dangling `(R20/R21)` citation in the notebook's "reading results from a
+  single day" caveat, corrected to `(R05, R20)`.
+
+### Findings (carried over from the deleted R21, so they are not lost)
+
+- The 3-bar rule's apparent win was an uncosted return (+0.186 bps/trade gross,
+  **t = 1.18**, n = 11,411) measured against a baseline that discarded every
+  overnight gap. Real QQQ buy and hold over the window was **+37.18%**, not the
+  +11.51% reported; net of 1.50 bps the rule returned **-78.03%**.
+- **Leverage does not offset a proportional cost.** Gross edge and slippage are
+  both quoted on notional, so leverage scales them by the same factor and the
+  break-even round-trip cost stays at the gross edge (0.186 bps) at any
+  leverage. Measured: 2x -> -95.3%, 5x -> -99.96%, 10x and 20x -> ruin, worst
+  20x day -52.8%. Only *fixed* per-ticket fees are amortised by size.
+- **Variance drag alone kills high leverage here.** With cost set to zero, 20x
+  still returns **-82.3%**: per-trade sigma is 16.8 bps against a 0.186 bps
+  mean, so `L*mu - (L*sigma)^2/2` turns negative well below 20x (Kelly ~6.6x, on
+  an edge that is not statistically distinguishable from zero).
+
+### Validation
+
+- 358 unit tests pass; `session_lab.ipynb` re-executed end to end.
+
+## 2026-09-06
+
+### Added
+
+- Trade panel size buttons: 25% / 50% / 75% / 100% of free cash as margin.
+- sim-trader draws an **Open** price line at the first fill and a dashed
+  **Add N** line plus a bar marker for each subsequent lot. The Open label
+  also shows live floating P&L (`Open +$12.34`).
+
+### Changed
+
+- sim-trader keeps cash, open position, and history when the date or
+  symbol changes. Playback **Reset day** only rewinds the tape. A header
+  **Reset** button restores $10,000 and clears the book.
+- sim-trader keeps the current zoom while bars append during Play. The
+  default left-pinned window is only reapplied on a new session or Reset.
+
+### Fixed
+
+- **sim-trader add/reduce sized remaining shares from the original entry.**
+  Reduce used `qty * (margin / total margin)`, which is `notional / first
+  (or average) entry`. Add/reduce now size shares at the slipped price of that
+  action. Each add is a separate lot; reduce peels lots LIFO and realises P&L
+  against those lot entries, not the first fill.
+
+### Validation
+
+- Typecheck `sim-trader` (`tsc --noEmit`).
+
+## 2026-09-05 (the 3-bar rule's win was uncosted, and its baseline was not buy and hold)
+
+### Fixed
+
+- **`three_bar` charged no transaction cost while trading 27 round trips per
+  session.** `run_three_bar` and `run_range` now take `cost_bps`, charged once
+  per round trip. Trades carry `gross_bps` / `cost_bps` / `net_bps`, and
+  `session_summary` reports `gross_return` and `return` (net) separately —
+  previously gross figures were published under the names `net_pnl`/`net_bps`,
+  which is how this went unnoticed.
+- **`daily_returns` called intraday open→close "buy_hold".** It now reports
+  `intraday_hold` (open→close, the risk-comparable baseline for an
+  overnight-flat rule) *and* `buy_hold` (close-to-close, seeded from the first
+  session's open), which compounds to `last close / first open − 1`.
+- Collapsed a dead `elif`/`else` pair in the opposite-run counter (both branches
+  reset it identically).
+
+### Findings
+
+- **The 3-bar rule does not beat buy and hold.** QQQ, 2025-01-05 → 2026-09-04,
+  417 sessions, 11,411 round trips. Reported +21.70% vs "buy & hold" +11.51%;
+  actual buy and hold over the same window is **+37.18%**, and net of 1.50 bps
+  the rule returns **−78.03%**.
+- Gross edge is **+0.186 bps per trade, t = 1.18** on n = 11,411 — not
+  distinguishable from zero. 0.50 bps of cost takes it to −31.21%.
+- **One basis point of stop slippage flips the sign** (+0.186 → −0.183 bps per
+  trade) on its own, before any spread. 5,303 of 11,411 exits are stops filled
+  at exactly the stop price.
+- The take-profit signalled and filled at the same bar's close, violating the
+  repo's execution-lag invariant. Not the source of the profit — lagging it
+  correctly raises gross to +0.282 bps — but fixed for consistency.
+- Overnight again accounts for the whole index return: intraday +13.61 points
+  vs overnight +22.54 points. Same conclusion as R20, reached from a rule that
+  shares no code with `sr_momentum`.
+
+### Added
+
+- `docs/research/R21-three-bar-audit.md`.
+- Tests: `test_the_round_trip_cost_is_charged_once_per_trade`,
+  `test_buy_and_hold_keeps_the_overnight_gap`.
+
+### Validation
+
+- 364 unit tests pass; `session_lab.ipynb` re-executed end to end.
+
+## 2026-09-03 (the scale-out fired far too early; moved to the coarse trend)
+
+### Added
+
+- `sr_momentum.exhaustion_source` (`decision` | `coarse`) — which series the
+  scale-out watches. Default unchanged.
+
+### Findings
+
+- **The scale-out was cutting size before trades worked.** Measured over 216
+  scaled positions on the trailing year: the cut landed at a median of **bar 7
+  of an 88-bar position** — 8% of the way in — at **+2.8 bps**, on positions
+  whose eventual best was **+18.6 bps**. 74% of cuts happened inside the first
+  ten bars.
+- The cause is structural: the decision grid's own statistic **peaks at the
+  entry by construction**, because the entry required it to be strong. Any decay
+  test on it therefore fires within a few bars of opening. On a 1-minute grid it
+  is measuring "the last minute was quiet", not "the move is over".
+- Reading the 5-minute trend instead fixes the timing: the cut moves to a median
+  of **bar 28 of 138** at decay 0.5, and **bar 40 of 152** at decay 0.35, with
+  profit at the cut rising +2.8 -> +3.8 -> +5.0 bps and the number of cuts
+  falling 216 -> 168 -> 152.
+- It does not improve returns: -1.60% -> -1.76% -> -1.99%. Holding a full
+  position longer on a zero-mean process is more exposure, not more edge.
+- **No decay rule can catch the reversal itself.** At the low of a move momentum
+  is at its *maximum*; a decay test necessarily fires after the move has faded,
+  which is later and at a worse price. Catching the turn needs a reversal
+  predictor, and R18 measured the reversal statistic at rank IC +0.0001.
+
+### Validation
+
+- 384 tests pass. New: the coarse source fires later than the decision grid, and
+  an unknown source is refused.
+
+## 2026-09-03 (peak-relative exhaustion, add-back, and the metric bug once more)
+
+### Added
+
+- `sr_momentum.exhaustion_decay` — scale out when momentum has fallen back from
+  **its own peak during this trade**, replacing the absolute-floor version for
+  the case it was built for. `exhaustion_z` (the floor) is kept and still off.
+- `sr_momentum.allow_add_back` — restore a scaled-down position to full size
+  when the entry rule would open that side again. The stop anchors are
+  deliberately not reset, so topping up cannot loosen protection already earned.
+- `sr_momentum.reverse_on_reversal` — stop and reverse rather than stand aside.
+- `features/multiframe.align_to_fine` — a coarse series on a fine grid, visible
+  only once each coarse bar has closed. `config/backtest/sr_momentum_index_1min.yaml`
+  runs the indicators on 1-minute bars with the 5-minute series as trend context.
+- `viz/setups` marks a **position cut back but not closed** with a hollow marker.
+
+### Fixed
+
+- **The absolute exhaustion floor fired at the start of moves, not the end.**
+  Traced on QQQ 2025-11-20: it halved the position at 35 bps of profit with
+  |z| = 1.04, immediately before a 339 bps continuation during which |z| rose to
+  5.8. At the low of a strong move momentum is at its *maximum*; a floor cannot
+  express "the move is over".
+- **The gallery headline used the same unweighted mean that inflated
+  `search.py`.** It read "+1.99 bps against a 1.50 bps cost" — profitable —
+  where the capital-weighted figure is **+0.24 bps**. Scale-outs split a
+  position into a half-size slice counted as a full observation.
+
+### Findings
+
+- 1-minute indicators with a 5-minute trend gate: **-1.59%** over the trailing
+  year against -4.77% for the 5-minute config, but it loses less mainly by
+  trading less — turnover 2.41 -> 1.03x/day, trades 711 -> 303. Gross +0.26 bps
+  at t = +0.19 against 1.50 bps of cost.
+- Scale-out and add-back are both neutral-to-slightly-negative:
+  -1.59% -> -1.60% -> -1.71%. Max drawdown improves (-2.56% -> -1.87%) and
+  Sharpe worsens.
+- **Stop-and-reverse, thresholds fitted on one day, is the worst configuration
+  tested in this project**: -19.23% on the trailing year against -4.77%
+  baseline, turnover 9.17x/day, mean hold 31 -> 6.8 bars, 52% of trades lasting
+  three bars or fewer. $15,357 of costs against -$3,873 of gross.
+
+### Validation
+
+- 382 tests pass. New: peak-relative exhaustion, add-back invariants (never
+  exceeds full size, never flips side, off by default), the flip's weight cap
+  and session-clock refusal, three for `align_to_fine`, three for the scale-out
+  marker.
+
+## 2026-09-03 (exhaustion scale-out; and a metric that inflated with it)
+
+### Added
+
+- `sr_momentum.exhaustion_z` / `exhaustion_keep` — when the momentum that
+  justified a position decays below `exhaustion_z` **while the trade is ahead**,
+  the position is reduced to `exhaustion_keep` of its size. Once per position,
+  never while losing, so it is a profit rule rather than a stop wearing one's
+  name. Off by default. Five tests.
+- `SessionLab.triggers(run)` and two notebook sections: every gate's value at
+  the decision bar for each trade, and the formulas the gates use, taken from
+  the implementations.
+
+### Fixed
+
+- **`gross per trade` was unweighted, and any rule that scales a position
+  inflated it.** A half-size scale-out slice counted as a full observation, and
+  the slice is closed at a selected (profitable) moment. On the same run the
+  exhaustion rule reported **+2.95 bps at t = +3.28 with a "net positive"
+  verdict** while total return *fell*; weighted by capital at risk it is
+  **+0.12 bps at t = +0.12**. `diagnose_shortfall` now weights by notional and
+  uses the Kish effective sample size for the t-statistic, and
+  `performance_summary` reports `gross_bps_weighted` / `net_bps_weighted`.
+
+### Findings
+
+- **Worked example, QQQ 2026-04-08.** Short at 09:45, held to the 15:50 flatten,
+  +23.4 bps gross. Initial stop **37 bps** (2 x ATR, tighter than the 79 bps
+  sigma stop), trail give-back **118 bps**. The trade's whole favourable
+  excursion was **68 bps** and its worst adverse was **21 bps**, so neither
+  barrier could ever fire: it sat in the dead zone between them all day and
+  exited on the clock. The trail is calibrated to `sigma_H`, not to the
+  excursion the trade actually produces.
+- **No long was available during the midday rally** because the strategy was
+  already short the same symbol: entry requires `position == FLAT`, and it held
+  a position on 10 of 12 bars in that window, proposing 0 entries. A symbol in a
+  position cannot take the other side; the only route out is an exit.
+- The exhaustion rule is a small genuine improvement on the trailing year —
+  total return **-4.77% -> -4.05%**, max drawdown **-7.22% -> -5.81%** — and
+  still not an edge: gross +0.13 bps at t = +0.12 against 1.50 bps of cost.
+
+### Validation
+
+- 368 tests pass. Notebook re-executed end to end after the metric change.
+
+## 2026-09-03 (single-session per-trade formula audit)
+
+### Added
+
+- `SessionLab.triggers()` now reconstructs every actual entry from its original
+  strategy decision bar and reports decision OHLCV, the live S/R break and
+  acceptance state, momentum numerator/scale, RVOL denominator, session VWAP,
+  ATR/sigma stop geometry, next-open gap, holding period, and gross/cost/net
+  outcomes. Thresholds are read from the actual run, including notebook
+  overrides.
+- `SessionLab.formula_audit()` expands every trade into eight symbolic formulas
+  with that trade's numerical inputs substituted: break, side hold,
+  acceptance, momentum, participation, VWAP, initial risk, and execution.
+- `SessionLab.trigger_windows()` exposes the six preceding bars, the original
+  decision bar, and the next-open fill bar for every trade; the fill is
+  explicitly marked as unavailable to the signal.
+- `notebooks/exploratory_only/session_lab.ipynb` now displays all trades both as
+  a comparison table and one-trade-at-a-time audit, the formula substitutions,
+  expanded bar state, and each trigger's OHLCV/indicator context window. It also
+  documents the signed long/short ratchet and the close-decision/next-open-fill
+  timing precisely.
+
+### Validation
+
+- The notebook executed end to end in the project `quant` environment: 15 code
+  cells produced outputs with zero errors. The example session produced three
+  trades and eight formula-audit rows for each trade.
+- 361 tests pass, including seven trigger-detail tests for decision-time
+  sampling, run-specific thresholds, break/stop reconstruction, complete
+  formula expansion, and strict decision/fill separation.
+
+## 2026-09-02 (one-day lab; and why the entry gates are not independent)
+
+### Added
+
+- `qtrader/experiments/session_lab.py` — `SessionLab`: load one session with its
+  warm-up once, then re-run the strategy against the cached bars while
+  parameters change. `run()`, `summary()`, `trades()`, `sweep()`.
+- `notebooks/exploratory_only/session_lab.ipynb` — interactive single-day
+  tuning: entries and exits on the standard `price_chart`, the day's return
+  against holding the symbol over the same hours, per-parameter sweeps, and a
+  bar-by-bar view of every entry gate. The notebook holds no strategy logic
+  (CLAUDE.md §18); it calls the module. Executed end to end before shipping.
+
+### Findings
+
+- **Momentum does not exist on these indices to chase.** Within-session
+  5-minute autocorrelation is ~0 at every lag (|rho| <= 0.033), and past-k
+  against next-k rank IC is between -0.02 and +0.005 for k in 3..24, every
+  |t| < 1.6.
+- **So the whole loss is the toll.** Trailing year: gross **-0.06 bps/trade**
+  (t = -0.04), cost 1.50, net -1.56 x 711 trades = -11.1% of notional, which at
+  47.7% average exposure is the -4.77% observed. Zero gross, paid for 711 times.
+- **The three entry gates are one gate counted three times.** `momentum_z` and
+  `vwap_side` point the same way **85.2%** of bars; each correlates +0.84 and
+  +0.62 with drift-since-the-open but only +0.23 and +0.34 with the last six
+  bars. They measure where price sits relative to the session open, not where it
+  is going. **30.6%** of firing bars fire against the last six bars' direction.
+  Worked example: QQQ 2026-01-29, shorted at 11:30 after price had risen 49 bps
+  over six bars, because cumulative drift was still -159 bps and VWAP side did
+  not flip until 11:40.
+
+### Fixed
+
+- `plot_setups.py` hardcoded "against a 3.00 bps round-trip cost" in its lede
+  while the index configs charge 1.50 — wrong about its own headline number. It
+  now reads the cost from the config.
+- The same page advertised a Kronos legend, title and explanation even when no
+  forecast was requested; all three are now conditional.
+
+### Validation
+
+- 354 tests pass. New: eight for `SessionLab` (warm-up depth, session isolation,
+  context reuse, refusals).
+
+## 2026-09-02 (trailing year vs buy-and-hold: the return was all overnight)
+
+### Added
+
+- `scripts/compare_buy_and_hold.py` — strategy against holding the same
+  instruments, with exposure adjustment and an intraday/overnight decomposition
+  of the benchmark. An intraday strategy is flat by the close, so the overnight
+  component is not a return it under-performed; it is one it never competed for.
+- `last_year` split (2025-09-01 -> 2026-08-29), labelled in `splits.yaml` as a
+  calendar window that straddles `m5_validate` and `m5_test` and must never be
+  cited as out-of-sample evidence.
+- `docs/research/R20-versus-buy-and-hold.md`.
+
+### Findings
+
+- Trailing year, SPY + QQQ at 1.50 bps per round trip: **strategy -4.77%**
+  (Sharpe -0.79, maxDD -7.22%) against **+24.27% holding the two equally**
+  (Sharpe +1.44, maxDD -11.25%). The strategy held a position on 72.3% of bars
+  at 47.7% average gross exposure, so it is not a small bet that lost.
+- **Essentially the entire index return was earned overnight.** Open-to-close
+  across the year: SPY **+1.42%**, QQQ **-1.44%**. Close-to-open: **+18.98%**
+  and **+29.50%**.
+- This reframes the shortfall. The strategy did not lose 29 points by trading
+  badly; it spent the year competing for a pool worth roughly zero while the
+  benchmark collected a return available only to positions held through the
+  close. Against an intraday-only benchmark the shortfall is real but far
+  smaller.
+- Worth recording for what to build next: if the tradable structure over this
+  year was in the close-to-open gap rather than inside the session, this project
+  has spent its entire effort on the wrong side of the clock. Testable in a few
+  lines against data already stored.
+
+## 2026-09-02 (SPY/QQQ: first positive numbers, and why they are not an edge)
+
+### Added
+
+- `config/universe/broad_index.yaml`, `config/backtest/sr_momentum_index_5min.yaml`
+  — SPY and QQQ, 1.50 bps per round trip, book sized so it cannot bind.
+- `docs/research/R19-broad-index.md`.
+- Downloaded QQQ 5-minute and SPY/QQQ 1-minute bars (509,475 bars) for the
+  spread measurement.
+
+### Findings
+
+- **First net-positive results in the project.** `m5_mine` +5.72% (gross +2.97
+  bps, t = +2.02), `m5_validate` +6.75% (+4.23 bps, t = +1.56), `m5_test`
+  -1.45% (+0.82 bps, t = +0.40). No parameter was fitted on index data —
+  `momentum_z_min: 0.25` came from R16 on stocks — so even `m5_mine` is
+  out-of-sample for the parameter choice.
+- **The cost assumption is conservative here, the reverse of R10.** Roll
+  half-spreads on 1-minute bars: SPY **0.37 bps** round trip, QQQ **1.19**,
+  against 1.50 charged. Breakeven is 2.97 / 4.23 / 0.82 bps by window, so the
+  first two clear the measured spread with room.
+- **But the result is five days.** Top 5 sessions are **141%** of the total on
+  `m5_mine` and **188%** on `m5_validate`; removing them turns every window
+  negative. Median day is -$37 / +$6 / -$58 and up days are 43-51%.
+- **The leg rotates**: QQQ carries `m5_mine` (+5.56 bps) while SPY is flat
+  (+0.51); SPY carries `m5_validate` (+5.35) while QQQ fades (+3.16); QQQ turns
+  negative on `m5_test` (-1.19). Same signature as R12's short-leg inversion.
+- **The t-statistics are overstated by ~1.25x**: daily P&L correlation between
+  the legs is +0.48 to +0.68, so two symbols are 1.2-1.35 independent legs, not
+  2. `m5_mine`'s +2.02 is nearer +1.6.
+- Verdict: not distinguishable from noise with a fat right tail, which is what a
+  breakout strategy on a trending index looks like with or without an edge.
+
+### Corrected
+
+- I first assumed `round_step: 1.0` would be far too fine on a $554 index. What
+  matters for a level is spacing against the bar range, not bps: **$1 is 2.38
+  ATR on SPY and 2.01 on QQQ** against 1.2-3.1 for the single stocks. The config
+  was run unchanged.
+
+## 2026-09-02 (displacement: built, measured, and the ranking statistic is a coin)
+
+### Added
+
+- `sr_momentum.displace_margin` and `_resolve_book`, replacing
+  `_respect_book_limit`. A queued candidate may evict a holding only when that
+  holding is **currently losing**, is the weakest replaceable one, and the
+  candidate beats it by at least the margin. The book never grows; winners are
+  never displaced. Off by default.
+- `docs/research/R18-displacement.md`.
+
+### Findings
+
+- **The book's ranking statistic carries no information.** `|momentum_z|` at
+  entry against realised gross return over 4,236 trades: **rank IC +0.0001,
+  t = +0.00**. The strongest-conviction quintile returns +0.34 bps against
+  +4.33 for the weakest, and the hit rate *falls* as conviction rises.
+- **Displacement is worse or equal in seven of eight cells** and raises trade
+  count and turnover in all eight — unavoidable, since each displacement adds an
+  exit and an entry. It hurts rather than merely costing turnover because it
+  makes the book act on an uninformative ranking more often.
+- **A higher confidence bar is actively harmful**: gross/trade +1.80 bps at
+  z=0.25, +0.64 at 1.0, **-1.28** at 1.5, -1.11 at 2.0. Trade count does fall as
+  requested (4,236 -> 2,607) but each remaining trade is worse.
+- **This settles R17.** The queue was not the binding problem — it was masking
+  the fact that the strategy cannot tell its good candidates from its bad ones.
+  Fixing the mechanism does not help when the ranking it enables is a coin.
+
+### Validation
+
+- 346 tests pass. New: eight for displacement, including a property test over
+  200 random book states asserting the cap is never breached and nothing opens
+  on top of a holding. It caught a real gap in the first implementation.
+
+## 2026-09-02 (final holdout; and the book limit, not the signal, picks the trades)
+
+### Findings
+
+- **`m5_test`, the last untouched window**: the R16 configuration
+  (`momentum_z_min: 0.25`, no fine filter) returns **-4.51%**, gross +1.52 bps
+  at **t = +0.78** against a 3.00 bps round trip. Gross retained 84% of its
+  in-sample value, but is indistinguishable from zero. All three 5-minute
+  windows are now spent and none produced a tradable edge.
+- **The book limit decides which trades happen, and it does not select** (R17).
+  On the pictured NVDA session the strategy proposed entries six times and the
+  book was full at all six; the one that traded had the *weakest* momentum of
+  the six. Across `m5_test` the book is at its cap on **82.9%** of intraday
+  bars, only **19.9%** of proposals become trades, and **92.4%** are made while
+  it is full. On `m5_mine` the trades taken score **-0.46 bps** against **+0.71**
+  for those rejected (t = -1.02) — admission is decided by exit timing, not
+  signal strength.
+- **This confounds every veto-filter experiment in the project** (R09, R10 §3,
+  R11 §2). Each found that a filter raised the trade count; the mechanism is now
+  quantified — a veto returns a slot to a queue saturated 83% of the time, which
+  refills immediately with a candidate no better and no worse.
+- LLM judgement of the 20 holdout gallery extremes: **13 keep, 5 veto, 2
+  abstain**. Losers vetoed 3/10, winners falsely vetoed 2/10 — a 10-point
+  separation on 18 verdicts, about one trade away from chance. 13 of 20 setups
+  were read as `volatile`, and every veto came from one.
+
+### Fixed
+
+- **`preflight()`**: a model that is not served now stops a run, naming what is
+  available. Previously a stale tag made all 20 calls 404, `on_abstain="keep"`
+  turned each into a keep, and the summary reported "0 vetoes, 50% balanced
+  accuracy" — indistinguishable from a model that judged everything and objected
+  to nothing.
+- **`DEFAULT_TIMEOUT` 45s -> 300s.** At 45s, 13 of 20 candidates timed out
+  against the 27B model and were reported as abstentions.
+- The gallery summary refuses to print rates when nothing was judged, and warns
+  when only some were.
+- Two candidates still abstain on `JSONDecodeError` — the model exceeds
+  `num_predict` mid-`rationale` and the JSON never closes. Recorded, not yet
+  fixed.
+
+### Added
+
+- `ValidationConfig.image_dir` keeps the chart each candidate was judged on; the
+  journal row carries `image_path` and the full `prompt`, so a decision replays
+  exactly without the model.
+- `docs/research/R17-book-capacity.md`.
+
+### Validation
+
+- 338 tests pass. New: image persistence, and preflight on a missing model.
+- Execution audit passes all five checks on `m5_test`.
+
+## 2026-09-02 (multi-timeframe: threshold helps, 1-minute confirmation is null)
+
+### Added
+
+- `features/multiframe.py` — causal alignment of a fine grid onto a coarse one.
+  A coarse bar labelled T closes at T+step, so it takes the LAST fine bar inside
+  its own span; taking the bar labelled T+step would leak the first minute of
+  the fill bar. Nine tests, including one that perturbs every fine bar from a
+  cut point forward and asserts no earlier coarse value moves.
+- `MarketContext.fine_panel` and `DataConfig.fine_timeframe`, both optional and
+  defaulting to nothing, so no existing strategy or config is affected.
+- `sr_momentum` gains `fine_momentum_z_min`, `fine_span`, `fine_vol_window`.
+  A bar where the fine grid has no reading is a refusal, not a pass.
+- `config/backtest/sr_momentum_5min_mtf.yaml` — the experiment, kept separate so
+  the settled baseline is untouched.
+- `docs/research/R16-multiframe-confirmation.md`.
+- Downloaded 4,632,341 1-minute bars across 31 symbols: the existing 1-minute
+  coverage began 2026-02 and did not overlap `m5_mine` at all.
+
+### Findings
+
+- **Lowering the coarse momentum threshold is a real improvement.** Gross per
+  trade +0.64 bps (z=1.0) -> +1.80 (z=0.25); total return -12.80% -> -7.38%.
+  Explained by mechanism: `session_drift_zscore` measures drift since the open,
+  so on the traced TSLA short (2025-03-17) it read -0.40 at the 10:25 break
+  while the previous six bars were -101 bps, and only cleared -1.00 at 11:40 —
+  five bars before the session low.
+- **The 1-minute confirmation carries no information.** Scored against each
+  trade's own realised forward return on a sample not selected by the filter:
+  **rank IC +0.0016, t = +0.22, n = 20,711**, and the agreement quintiles are
+  flat (49.3%-50.0% hit rate throughout).
+- The threshold grid's apparent variation is noise: the fine dimension is
+  non-monotonic at every coarse level, and the best cell (coarse 0.50 / fine
+  1.0, +1.83 bps) is statistically identical to coarse 0.25 with **no** fine
+  filter (+1.80).
+- Nothing in the grid is tradable. Best gross +1.83 bps against a configured
+  3.00 bps round trip, best total return -6.12%.
+
+### Validation
+
+- 334 tests pass.
+- Execution audit passes all five checks on the multi-timeframe path.
+- Nine grid cells recorded; `m5_mine` has now carried roughly 40 trials.
+
+## 2026-09-02 (LLM audit of gallery extremes)
+
+### Added
+
+- `scripts/test_llm_gallery.py` maps the exact best/worst setup-gallery episodes
+  back to their original candidate runs, asks the existing veto-only LLM layer
+  for a causal verdict, journals every call, computes discrimination metrics,
+  and renders the 40 panels with the LLM action in each title.
+- Setup galleries accept optional per-episode LLM decisions.
+- `docs/research/R15-llm-gallery-veto-audit.md`.
+
+### Fixed
+
+- The LLM prompt now states the exact JSON-only output contract. The installed
+  MLX Qwen renderer ignored Ollama's schema argument by itself and returned
+  Markdown prose, which correctly became abstentions but made the layer inert.
+
+### Findings
+
+- On the exact 20 best and 20 worst R14 charts, Qwen3.6 vetoed **1/20 losers
+  (5%)** and **0/20 winners**; 5 responses abstained under fail-open handling.
+- Balanced accuracy was 52.5%. Among parseable decisions, confidence in the
+  proposed side was higher for losers (0.815) than winners (0.783). The model
+  mostly repeats the quant setup thesis rather than identifying failed
+  continuation.
+- The one correct veto removed 171 bps, only 4.2% of the selected worst group's
+  summed gross loss. This screen does not justify a full LLM-filter backtest.
+
+## 2026-09-02 (ATR initial stop and break acceptance)
+
+### Added
+
+- `sr_momentum.acceptance_bars`: requires consecutive post-break closes to
+  continue in the breakout direction; the event bar cannot confirm itself.
+- `sr_momentum.initial_stop_atr`: caps the initial sigma stop in ATR units while
+  leaving the wider horizon-sigma trend ratchet unchanged.
+- Decision diagnostics `acceptance_count` and `initial_stop_bps`, focused
+  regression tests, and `docs/research/R14-atr-stop-and-break-acceptance.md`.
+- Combined-strategy gallery with 20 best and 20 worst trades at
+  `results/sr_momentum_5min__m5_mine/setups_atr_acceptance.html`.
+
+### Fixed
+
+- A traded breakout is consumed until price invalidates its boundary. A tight
+  stop can no longer re-enter the identical, never-reset breakout repeatedly.
+
+### Findings
+
+- The pictured AAPL short improves locally: 2 ATR cuts it from −355 to −149
+  bps; one-bar acceptance rejects it entirely. A MACD death-cross filter would
+  not have helped because MACD was already bearish at the decision.
+- The portfolio result is negative. Baseline: 2,809 trades, +4.02 bps/trade,
+  +3.45% return. Combined: 4,037 trades, +0.64 bps/trade, −12.80% return.
+  The combined 1% loss tail improves from −284 to −140 bps, but turnover rises
+  from 2.54x to 3.66x/day and large winners are removed too.
+- Keep the mechanisms as explicit risk/confirmation controls, but do not call
+  this configuration an alpha improvement or deploy it on this evidence.
+
+### Validation
+
+- 45 focused and 324 full-suite tests pass.
+- All five execution audit checks pass over 8,074 fills.
+- `m5_test` remains untouched.
+
+## 2026-09-01 (first ten minutes are observation-only)
+
+### Changed
+
+- The canonical `sr_momentum_5min` config now sets
+  `no_entry_before: "09:35"`; because timestamps are bar opens and fills occur
+  at the next open, this makes 09:40 the earliest possible fill.
+- `no_entry_before` now consumes setups formed while the gate is closed. A
+  pre-cutoff break cannot be entered on the first admitted bar; the level must
+  invalidate and re-break, or a different level must break after the cutoff.
+- Break and discarded-break state now reset at session boundaries.
+- The engine cancels delayed targets when their lag would cross a session
+  boundary. Pending intraday targets are day orders, including after an early
+  close; they cannot execute at the next session's open.
+
+### Added
+
+- Focused regressions for cancellation of a blocked setup and admission after a
+  genuine reset/re-break.
+- `docs/research/R13-open-ten-minute-blackout.md`.
+- A standard 20-best/20-worst gallery at
+  `results/sr_momentum_5min__m5_mine/setups_open10_blackout.html`.
+
+### Findings
+
+- The constraint is binding: zero entries before 09:40 ET; earliest fill 09:40.
+- It does not improve the strategy. On `m5_mine`: 2,790 trades, +4.33 bps gross
+  per trade (t=+1.86), +4.69% total return, Sharpe +0.42, max drawdown −10.49%,
+  and 2.52x/day turnover. The earlier reference was +4.33 bps gross and +4.86%
+  total return: economically unchanged and still insignificant after mining.
+- 53.5% of trades enter at 09:40. The gate is retained as an explicit
+  constraint, not as alpha.
+
+### Validation
+
+- 49 focused tests pass; 316 full-suite tests pass.
+- The execution audit passes all five checks over 5,558 fills.
+- `m5_test` remains untouched.
+
+## 2026-08-30 (out-of-sample test: the configuration did not replicate)
+
+### Findings
+
+- **`sr_momentum` was taken once to `m5_validate` and failed.** Gross per trade
+  +4.33 -> **+1.36 bps**, t +1.86 -> **+0.50**, total return +4.86% ->
+  **-5.24%**, Sharpe +0.44 -> -0.51, max drawdown -8.60% -> -18.44%. Gross
+  retained 31% of its in-sample value and is indistinguishable from zero.
+- **The short leg inverted**: +4.91 bps in sample against -3.10 out of sample, a
+  swing of -8.0 bps per trade. It carried the in-sample result and is the larger
+  loser out of sample. A structural effect does not change sign.
+- **The session profile survived** — 50% of entries still decided in the first
+  ten minutes, still the largest positive bucket — so the failure is a smaller
+  edge rather than different behaviour, and R10 section 5's cost finding applies
+  to this window unchanged.
+- This is what ~33 trials at a best in-sample t of +1.94, against a Bonferroni
+  bar near 3.3, predicts. The result is confirmation, at the cost of the window.
+
+### Added
+
+- `docs/research/R12-out-of-sample.md`.
+- `sr_momentum` gains `max_giveback`, `exit_on_reversal`, `reversal_bars` and
+  `exit_on_opposite_signal` — exits driven by the trend judgement rather than a
+  fixed barrier. All off by default; all measured worse than the ratchet
+  (R10 sections 5i and 5j). Across eight configurations the more responsive the
+  exit, the better one traced trade looks and the worse the sample performs,
+  monotonically from +4.86% to -35.65%.
+
+### Removed
+
+- Nothing. `sr_momentum` is retained as a measured negative result with its
+  research notes, not carried forward as a candidate.
+
+### Validation
+
+- 312 tests pass.
+- Execution audit passes all five checks on `m5_validate` over 4,150 fills.
+- `m5_test` remains untouched. Both 5-minute research windows are now spent.
+
 ## 2026-08-30 (Kronos agreement required; previous-day bars removed)
 
 Two instructions, both implemented in full and made the config default. This

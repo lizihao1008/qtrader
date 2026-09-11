@@ -50,6 +50,15 @@ are your own directional convictions, not a score for the proposal — if you
 think the correct trade is the opposite of the proposal, say so by putting your
 confidence on that side. Set supports_setup to false if the context contradicts
 the proposal, whatever your confidences are.
+
+OUTPUT CONTRACT
+Return only one compact JSON object, with no Markdown, preamble or code fence:
+{{"regime":"trend_up|trend_down|range|volatile|unclear",
+  "long_confidence":0.0,"short_confidence":0.0,"wait_confidence":0.0,
+  "supports_setup":true,"contradictions":["short reason"],
+  "rationale":"brief audit note"}}
+All three confidences must be numbers from 0 to 1. Use at most three short
+contradictions. Do not repeat the analysis outside the JSON object.
 """
 
 PROMPT_VERSION = hashlib.sha256(TEMPLATE.encode()).hexdigest()[:12]

@@ -34,6 +34,11 @@ class DataConfig:
     feed: str = "iex"
     regular_hours_only: bool = True
 
+    #: Optional finer timeframe loaded alongside `timeframe`, for strategies
+    #: that confirm a coarse decision on a faster grid. ``None`` loads nothing
+    #: and costs nothing.
+    fine_timeframe: str | None = None
+
     def start_dt(self) -> dt.datetime:
         return _parse_datetime(self.start)
 

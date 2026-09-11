@@ -7,9 +7,11 @@ import pytest
 
 from qtrader.backtest.costs import CostModel
 from qtrader.backtest.engine import BacktestEngine, ExecutionConfig
+from qtrader.data.panel import BarPanel
 from qtrader.strategies.base import MarketContext, StrategySignals
 from qtrader.strategies.ma_cross import MACrossStrategy
-from tests.conftest import make_context
+from qtrader.universe.definition import Universe
+from tests.conftest import make_bars, make_context
 
 FREE = CostModel(half_spread_bps=0.0, slippage_bps=0.0)
 
@@ -47,6 +49,35 @@ def test_signal_is_filled_on_the_next_bar_open():
     assert first_fill["timestamp"] == context.index[2]
     assert first_fill["reference_price"] == pytest.approx(105.0)
     assert first_fill["shares"] == 95  # floor(10_000 / 105)
+
+
+def test_a_pending_target_is_cancelled_at_the_session_boundary():
+    """Execution lag is measured in bars, but day orders do not rest overnight."""
+    index = pd.DatetimeIndex(
+        [
+            pd.Timestamp("2026-08-03 15:55", tz="America/New_York"),
+            pd.Timestamp("2026-08-04 09:30", tz="America/New_York"),
+            pd.Timestamp("2026-08-04 09:31", tz="America/New_York"),
+        ]
+    ).tz_convert("UTC")
+    panel = BarPanel.from_frames(
+        {
+            "AAA": make_bars([100.0] * 3, index=index),
+            "SPY": make_bars([10.0] * 3, index=index),
+        }
+    )
+    context = MarketContext(
+        panel=panel,
+        universe=Universe(name="test", symbols=("AAA",), benchmark="SPY"),
+        tradable=pd.DataFrame(True, index=index, columns=["AAA"]),
+    )
+    signals = weights_from(context, {"AAA": [1.0, 0.0, 0.0]})
+
+    result = BacktestEngine(FREE, ExecutionConfig(initial_cash=10_000.0)).run(
+        context, signals
+    )
+
+    assert result.fills.empty, "the prior session's target filled at the next open"
 
 
 def test_weights_split_capital_across_symbols():

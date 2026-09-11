@@ -54,6 +54,13 @@ class MarketContext:
     #: ``timestamp x symbol`` mask over tradable stocks (reference ETFs excluded).
     tradable: pd.DataFrame
 
+    #: Optional finer-timeframe bars over the same window, for strategies that
+    #: confirm a coarse decision against a faster grid. ``None`` when the run
+    #: did not ask for one, so every existing strategy is unaffected.
+    #: Alignment between the two grids belongs to `features.multiframe`, never
+    #: to a strategy.
+    fine_panel: BarPanel | None = None
+
     @property
     def index(self) -> pd.DatetimeIndex:
         return self.panel.index

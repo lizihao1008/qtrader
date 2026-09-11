@@ -31,7 +31,14 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from ..analysis.episodes import Episodes
-from .charts import ACCENT_COLOR, FLAT_COLOR, LONG_COLOR, SHORT_COLOR
+from .charts import (
+    ACCENT_COLOR,
+    FLAT_COLOR,
+    LONG_COLOR,
+    SHORT_COLOR,
+    _intraday_rangebreaks,
+    _market_naive,
+)
 
 #: Faint level families drawn for context, in draw order.
 CONTEXT_LEVELS = (
@@ -42,6 +49,9 @@ CONTEXT_LEVELS = (
 )
 
 KRONOS_COLOR = "#ab47bc"
+#: The consolidation box. Deliberately not the S/R colour: one is a level the
+#: strategy watches, the other is a regime a separate detector reports.
+RANGE_COLOR = "#f9a825"
 LEVEL_COLOR = "#455a64"
 
 
@@ -52,10 +62,18 @@ def setup_gallery(
     title: str,
     forecasts: dict[tuple[pd.Timestamp, str], pd.DataFrame] | None = None,
     scores: pd.DataFrame | None = None,
+    llm_actions: dict[str, dict] | None = None,
+    ranges: dict[str, pd.DataFrame] | None = None,
     columns: int = 4,
     height_per_row: int = 300,
 ) -> go.Figure:
-    """A grid of real-price panels: candles, the watched level, and the forecast."""
+    """A grid of real-price panels: candles, the watched level, and the forecast.
+
+    ``ranges`` is the consolidation state per symbol — the frame
+    ``experiments.consolidation_gate.range_state`` returns, indexed by timestamp
+    with ``in_range`` / ``range_id`` / ``range_high`` / ``range_low``. Omitted,
+    the panels are exactly what they were.
+    """
     forecasts = forecasts or {}
     rows = max(1, -(-len(episode_ids) // columns))
 
@@ -63,7 +81,11 @@ def setup_gallery(
         rows=rows,
         cols=columns,
         subplot_titles=[
-            _panel_title(episodes, episode_id, scores) for episode_id in episode_ids
+            _panel_title(
+                episodes, episode_id, scores,
+                (llm_actions or {}).get(episode_id),
+            )
+            for episode_id in episode_ids
         ],
         # Plotly caps vertical spacing at 1/(rows-1).
         vertical_spacing=min(0.09, 0.85 / (rows - 1)) if rows > 1 else 0.09,
@@ -72,7 +94,8 @@ def setup_gallery(
 
     for position, episode_id in enumerate(episode_ids):
         row, col = divmod(position, columns)
-        _draw_panel(figure, episodes, episode_id, forecasts, row + 1, col + 1)
+        _draw_panel(figure, episodes, episode_id, forecasts, row + 1, col + 1,
+                    ranges=ranges)
 
     figure.update_layout(
         title=title,
@@ -81,14 +104,23 @@ def setup_gallery(
         showlegend=False,
         plot_bgcolor="white",
     )
+    # Real exchange-local time. Each panel spans its own hours, so the axes are
+    # not shared -- the point of the grid is to compare shapes, and a common
+    # time axis across unrelated sessions would compare nothing. Rangebreaks
+    # keep an overnight gap from stretching a panel that straddles one.
+    # Clock time on the axis, the date in the panel title. A window is usually
+    # one session, and letting plotly pick its own format gives some panels
+    # rotated date stamps and others plain times, which makes a grid hard to
+    # read across.
     figure.update_xaxes(rangeslider_visible=False, showgrid=True, gridcolor="#eceff1",
-                        tickfont=dict(size=9))
+                        tickfont=dict(size=9), tickformat="%H:%M",
+                        rangebreaks=_intraday_rangebreaks())
     figure.update_yaxes(showgrid=True, gridcolor="#eceff1", tickfont=dict(size=9))
     # Axis titles only on the outer edge; repeating them on every panel spends
     # space that the panels themselves need.
     last_row = -(-len(episode_ids) // columns)
     for col in range(1, columns + 1):
-        figure.update_xaxes(title_text="bars from entry", title_font=dict(size=10),
+        figure.update_xaxes(title_text="exchange-local time", title_font=dict(size=10),
                             row=last_row, col=col)
     for row in range(1, rows + 1):
         figure.update_yaxes(title_text="price", title_font=dict(size=10), row=row, col=1)
@@ -98,16 +130,16 @@ def setup_gallery(
 
 
 # --------------------------------------------------------------------- panel
-def _draw_panel(figure, episodes, episode_id, forecasts, row, col):
+def _draw_panel(figure, episodes, episode_id, forecasts, row, col, *, ranges=None):
     window = episodes.window(episode_id).reset_index()
     meta = episodes.features.loc[episode_id]
     long = meta["direction"] == "LONG"
     hold = int(meta["hold_bars"])
-    offset = window["offset"].to_numpy()
+    when = _market_naive(window["timestamp"])
 
     figure.add_trace(
         go.Candlestick(
-            x=offset,
+            x=when,
             open=window["open"], high=window["high"],
             low=window["low"], close=window["close"],
             increasing_line_color=LONG_COLOR,
@@ -120,13 +152,58 @@ def _draw_panel(figure, episodes, episode_id, forecasts, row, col):
         row=row, col=col,
     )
 
-    _draw_levels(figure, window, offset, row, col)
+    # Drawn before the levels so the box sits behind the lines that matter.
+    _draw_ranges(figure, window, meta, ranges, row, col)
+    _draw_levels(figure, window, row, col)
     _draw_entry_and_exit(figure, window, meta, long, hold, row, col)
     _draw_peak(figure, window, long, hold, row, col)
+    _draw_reductions(figure, window, row, col)
     _draw_forecast(figure, window, meta, forecasts, row, col)
 
 
-def _draw_levels(figure, window, offset, row, col):
+def _draw_ranges(figure, window, meta, ranges, row, col):
+    """Shade every consolidation box the detector was tracking in this window.
+
+    One rectangle per ``range_id``, spanning the bars it was live for at the
+    high/low it had frozen. Boxes are drawn from the detector's own state
+    rather than recomputed, so the picture is what the gate actually saw —
+    including a box that was still live when the trade opened.
+    """
+    if not ranges:
+        return
+    state = ranges.get(meta["symbol"])
+    if state is None or state.empty:
+        return
+    stamps = pd.DatetimeIndex(window["timestamp"])
+    live = state.reindex(stamps)
+    live = live.loc[live["in_range"].fillna(False).to_numpy(dtype=bool)]
+    if live.empty:
+        return
+
+    local = _market_naive(pd.Series(live.index))
+    for range_id, group in pd.DataFrame({
+        "at": local,
+        "range_id": live["range_id"].to_numpy(),
+        "high": live["range_high"].to_numpy(dtype=float),
+        "low": live["range_low"].to_numpy(dtype=float),
+    }).groupby("range_id"):
+        high, low = float(group["high"].iloc[-1]), float(group["low"].iloc[-1])
+        if not (np.isfinite(high) and np.isfinite(low)) or high <= low:
+            continue
+        figure.add_shape(
+            type="rect", x0=group["at"].iloc[0], x1=group["at"].iloc[-1],
+            y0=low, y1=high, fillcolor=RANGE_COLOR, opacity=0.13,
+            line=dict(width=1, color=RANGE_COLOR, dash="dot"),
+            layer="below", row=row, col=col,
+        )
+        figure.add_annotation(
+            x=group["at"].iloc[0], y=high, text="震荡区间",
+            showarrow=False, xanchor="left", yanchor="bottom",
+            font=dict(size=8, color=RANGE_COLOR), row=row, col=col,
+        )
+
+
+def _draw_levels(figure, window, row, col):
     """The watched level and its zone, plus the other families for context.
 
     Read at offset -1, the **decision** bar. At offset 0 the position is already
@@ -191,15 +268,20 @@ def _draw_entry_and_exit(figure, window, meta, long, hold, row, col):
     exit_row = window.loc[window["offset"] == hold]
     exit_price = float(exit_row["close"].iloc[0]) if len(exit_row) else np.nan
 
-    figure.add_vline(x=0, line=dict(width=1.1, color=LEVEL_COLOR), row=row, col=col)
-    figure.add_vline(x=hold, line=dict(width=1, color=FLAT_COLOR, dash="dot"),
-                     row=row, col=col)
+    entry_at = _stamp(entry_row)
+    exit_at = _stamp(exit_row)
+    if entry_at is not None:
+        figure.add_vline(x=entry_at, line=dict(width=1.1, color=LEVEL_COLOR),
+                         row=row, col=col)
+    if exit_at is not None:
+        figure.add_vline(x=exit_at, line=dict(width=1, color=FLAT_COLOR, dash="dot"),
+                         row=row, col=col)
 
     colour = LONG_COLOR if long else SHORT_COLOR
-    if np.isfinite(entry_price):
+    if np.isfinite(entry_price) and entry_at is not None:
         figure.add_trace(
             go.Scatter(
-                x=[0], y=[entry_price], mode="markers",
+                x=[entry_at], y=[entry_price], mode="markers",
                 marker=dict(symbol="triangle-up" if long else "triangle-down",
                             size=12, color=colour,
                             line=dict(width=1, color="white")),
@@ -207,15 +289,52 @@ def _draw_entry_and_exit(figure, window, meta, long, hold, row, col):
             ),
             row=row, col=col,
         )
-    if np.isfinite(exit_price):
+    if np.isfinite(exit_price) and exit_at is not None:
         figure.add_trace(
             go.Scatter(
-                x=[hold], y=[exit_price], mode="markers",
+                x=[exit_at], y=[exit_price], mode="markers",
                 marker=dict(symbol="x", size=8, color=LEVEL_COLOR),
                 showlegend=False, name="exit",
             ),
             row=row, col=col,
         )
+
+
+def _draw_reductions(figure, window, row, col):
+    """Mark where the position was cut back without being closed.
+
+    A scale-out is invisible in the entry/exit markers: the strategy leaves a
+    smaller position running, and the engine records the slice as its own round
+    trip, so the panel would show an ordinary exit. Reading the weight path
+    directly is the only way to tell "took half off" from "closed".
+    """
+    if "target_weight" not in window:
+        return
+    weight = window["target_weight"].to_numpy(dtype=float)
+    if not np.isfinite(weight).any():
+        return
+
+    previous = np.concatenate([[0.0], weight[:-1]])
+    size, was = np.abs(weight), np.abs(previous)
+    # smaller than the bar before, same side, and still holding something
+    cut = (size > 1e-12) & (was > size + 1e-12) & (np.sign(weight) == np.sign(previous))
+    if not cut.any():
+        return
+
+    at = np.flatnonzero(cut)
+    when = _market_naive(window["timestamp"].to_numpy()[at])
+    figure.add_trace(
+        go.Scatter(
+            x=when, y=window["close"].to_numpy()[at],
+            mode="markers",
+            marker=dict(symbol="triangle-down-open", size=11,
+                        line=dict(width=2, color=ACCENT_COLOR)),
+            showlegend=False, name="scaled out",
+            customdata=[[f"{1 - size[i] / was[i]:.0%}"] for i in at],
+            hovertemplate="took %{customdata[0]} off<extra></extra>",
+        ),
+        row=row, col=col,
+    )
 
 
 def _draw_peak(figure, window, long, hold, row, col):
@@ -235,7 +354,7 @@ def _draw_peak(figure, window, long, hold, row, col):
 
     figure.add_trace(
         go.Scatter(
-            x=[held.loc[best, "offset"]], y=[series.loc[best]],
+            x=[_market_naive([held.loc[best, "timestamp"]])[0]], y=[series.loc[best]],
             mode="markers",
             marker=dict(symbol="circle-open", size=9, line=dict(width=1.6, color=ACCENT_COLOR)),
             showlegend=False, name="peak",
@@ -263,9 +382,14 @@ def _draw_forecast(figure, window, meta, forecasts, row, col):
         return
 
     path = forecast["close"].to_numpy(dtype=float)
+    # The forecast's own index is not relied on: it is set by whoever produced
+    # it and a caller may hand back a plain range. The bars it predicts are the
+    # window's own, counted forward from the decision bar, extrapolated with the
+    # median spacing once the window runs out.
+    stamps = _forecast_times(window, decision, len(path))
     figure.add_trace(
         go.Scatter(
-            x=np.arange(-1, len(path)),
+            x=stamps,
             y=np.concatenate([[anchor], path]),
             mode="lines+markers",
             line=dict(width=1.8, color=KRONOS_COLOR, dash="dash"),
@@ -276,12 +400,13 @@ def _draw_forecast(figure, window, meta, forecasts, row, col):
     )
 
 
-def _panel_title(episodes, episode_id, scores) -> str:
+def _panel_title(episodes, episode_id, scores, llm_decision=None) -> str:
     meta = episodes.features.loc[episode_id]
     window = episodes.window(episode_id).reset_index()
     arrow = "▲ LONG" if meta["direction"] == "LONG" else "▼ SHORT"
+    entry = _market_naive([meta["entry_time"]])[0]
     head = f"{meta['symbol']} {arrow} · {meta['gross_return_bps']:+.0f} bps"
-    tail = f"{int(meta['hold_bars'])} bars held"
+    tail = f"{entry:%Y-%m-%d} · {int(meta['hold_bars'])} bars held"
 
     decision = window.loc[window["offset"] == -1]
     if scores is not None and not decision.empty:
@@ -294,5 +419,59 @@ def _panel_title(episodes, episode_id, scores) -> str:
         if np.isfinite(score):
             agrees = np.sign(score) == (1 if meta["direction"] == "LONG" else -1)
             tail += f" · Kronos {score:+.2f} {'✓' if agrees else '✗'}"
-    # Two lines: a four-column grid cannot fit this on one without truncating.
+    if llm_decision is not None:
+        action = llm_decision.get("action", "unknown")
+        label = {
+            "keep": "KEEP ✓",
+            "veto": "VETO ✕",
+            "abstain": "ABSTAIN ○",
+            "expired": "EXPIRED ⧖",
+        }.get(action, action.upper())
+        verdict = llm_decision.get("verdict") or {}
+        confidence = verdict.get(
+            "long_confidence" if meta["direction"] == "LONG" else "short_confidence"
+        )
+        tail += f" · LLM {label}"
+        if confidence is not None:
+            tail += f" {float(confidence):.2f}"
+    # The readings the entry gate actually tested, at the decision bar. Without
+    # them a panel shows what happened but not what the rule was looking at.
+    gates = []
+    for column, label, fmt in (
+        ("momentum_z", "z", "{:+.2f}"),
+        ("relative_volume", "rvol", "{:.2f}"),
+        ("horizon_sigma_bps", "σH", "{:.0f}bps"),
+        ("acceptance_count", "accept", "{:.0f}"),
+    ):
+        value = _at(decision, column)
+        if np.isfinite(value):
+            gates.append(f"{label} {fmt.format(value)}")
+    side = _at(decision, "vwap_side")
+    if np.isfinite(side) and side != 0:
+        gates.append("vwap " + ("above" if side > 0 else "below"))
+    if gates:
+        tail += "<br>" + " · ".join(gates)
+    # Three lines: a four-column grid cannot fit this on one without truncating.
     return f"{head}<br><span style='font-size:9px;color:#607d8b'>{tail}</span>"
+
+
+def _forecast_times(window, decision, count: int):
+    """Exchange-local x positions for the decision bar plus ``count`` bars after it."""
+    timestamps = pd.DatetimeIndex(window["timestamp"])
+    start = pd.Timestamp(decision["timestamp"].iloc[0])
+    ahead = timestamps[timestamps > start][:count]
+
+    if len(ahead) < count:
+        step = pd.Series(timestamps).diff().median()
+        last = ahead[-1] if len(ahead) else start
+        extra = [last + step * (k + 1) for k in range(count - len(ahead))]
+        ahead = ahead.append(pd.DatetimeIndex(extra))
+
+    return _market_naive(pd.DatetimeIndex([start]).append(ahead))
+
+
+def _stamp(row):
+    """Exchange-local timestamp of a single window row, or None if it is absent."""
+    if row.empty:
+        return None
+    return _market_naive([row["timestamp"].iloc[0]])[0]

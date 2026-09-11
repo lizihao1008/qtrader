@@ -1,0 +1,25 @@
+# The twelve symbols the market_state persistence model has out-of-sample
+# predictions for across the whole `last_year` window.
+#
+# Not a stock-picking choice: it is the intersection of that model's walk-forward
+# coverage with this store. CVX, HD and UNH are in the model's universe but its
+# folds produce no 2026 rows for them, so a gate built on it would be inert on
+# those names — and an inert gate on part of the book is a book-capacity
+# experiment (R17), not a gate experiment.
+#
+# SPY is the benchmark only; it is never a position here.
+name: consolidation_ml_12
+benchmark: SPY
+symbols:
+  - AAPL
+  - AMD
+  - AMZN
+  - BAC
+  - GOOGL
+  - JPM
+  - META
+  - MSFT
+  - MU
+  - NVDA
+  - TSLA
+  - XOM

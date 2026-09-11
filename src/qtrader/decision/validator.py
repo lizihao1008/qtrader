@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 
 import pandas as pd
 
@@ -57,6 +58,11 @@ class ValidationConfig:
 
     #: Stop after this many *model calls* (cached rows are free). 0 means no cap.
     max_calls: int = 0
+
+    #: Where to keep the chart each candidate was judged on. The image is part
+    #: of the model's input, so a run that cannot show it cannot be audited or
+    #: replayed. ``None`` keeps nothing.
+    image_dir: str | None = None
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.min_confidence <= 1.0:
@@ -163,6 +169,7 @@ def _judge(candidate, signals, context, client, config, budget, key, model) -> d
 
     text = prompt_module.build(snapshot, coarse_factor=config.coarse_factor)
     image = chart_module.render(snapshot) if config.use_image else b""
+    image_path = _keep_image(image, config.image_dir, key, candidate)
     reply = client.ask(text, image)
     elapsed = time.perf_counter() - started
 
@@ -174,6 +181,8 @@ def _judge(candidate, signals, context, client, config, budget, key, model) -> d
         "options": getattr(reply, "options", {}),
         "raw": reply.raw[:2000],
         "error": reply.error,
+        "image_path": image_path,
+        "prompt": text,
     }
 
     if budget is not None and reply.latency_s > budget:
@@ -187,6 +196,18 @@ def _judge(candidate, signals, context, client, config, budget, key, model) -> d
     action = decide(reply.verdict, candidate.direction,
                     min_confidence=config.min_confidence)
     return {**row, "action": action.value, "verdict": reply.verdict.as_record()}
+
+
+def _keep_image(image: bytes, directory: str | None, key: str, candidate) -> str:
+    """Persist the chart the model was shown, named so a journal row finds it."""
+    if not image or not directory:
+        return ""
+    folder = Path(directory)
+    folder.mkdir(parents=True, exist_ok=True)
+    stamp = candidate.timestamp.strftime("%Y%m%dT%H%M")
+    path = folder / f"{candidate.symbol}_{stamp}_{key}.png"
+    path.write_bytes(image)
+    return str(path)
 
 
 def _abstain(config) -> str:

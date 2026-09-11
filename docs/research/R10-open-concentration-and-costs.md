@@ -54,6 +54,10 @@ movement is.
 `no_entry_before` was implemented as a clock-based session-open blackout,
 symmetric with the existing `no_entry_after`.
 
+> Historical semantics: this section measures the original pure gate, which
+> delayed live setups. R13 later replaced it with a setup-invalidating gate and
+> re-ran the 09:40 experiment. That stricter version is also negative.
+
 | variant | trades | gross/trade | t | net | total return | turnover |
 | --- | --- | --- | --- | --- | --- | --- |
 | **baseline** | 2,788 | **+3.50 bps** | +1.51 | +0.50 | −3.02% | 1.80x |
@@ -428,6 +432,149 @@ the bucket the cost model gets most wrong.
 
 ---
 
+## 5i. Why a big winner can finish flat: the give-back is sized at entry
+
+Traced from one trade — MU short, 2026-06-29, decided 09:35, filled 09:40 at
+1090.86.
+
+| | |
+| --- | --- |
+| peak profit (on closes, 10:10) | **+543 bps** |
+| trail give-back allowance | `1.5 x sigma_H` = `1.5 x 280` = **420 bps** |
+| that allowance as a share of the peak | **77%** |
+| exit signalled | 11:25, after surrendering 457 bps |
+| realised | **+86 bps** gross, +78 net |
+
+The strategy already implements a give-back rule — the ratchet *is* one. The
+problem is what the allowance is measured against. `trail_sigmas * sigma_H` is
+fixed at entry from the volatility at entry, and this entry was at 09:35, where
+`sigma_H` read 280 bps. A trade can then be several hundred bps ahead and still
+surrender almost all of it before the trail is touched.
+
+This is the R10 §5 problem again in a different guise: the opening bars are
+where the volatility estimate is largest, so both the position size *and* the
+exit geometry are calibrated off the least representative reading of the day.
+
+### The fix, and why it is not enabled
+
+`max_giveback` caps the surrendered profit as a fraction of the peak, armed only
+once the position is up more than it risked — scale-free, and needing no
+threshold of its own. On the MU trade it does exactly what it should:
+
+| | exit | realised |
+| --- | --- | --- |
+| ratchet only | 11:30 @ 1082.20 | +$697 |
+| give back <= 50% | 11:00 @ 1062.96 | **+$2,163** |
+| give back <= 35% | 10:30 @ 1055.00 | **+$2,856** |
+
+On `m5_mine`, across 2,761 trades, it makes things worse:
+
+| | trades | hit rate | gross/trade | t | total return | turnover |
+| --- | --- | --- | --- | --- | --- | --- |
+| **ratchet only** | 2,761 | 44.5% | **+4.33** | +1.86 | **+4.86%** | 2.50x |
+| give back <= 50% | 3,200 | 46.0% | +2.25 | +1.13 | −3.78% | 2.90x |
+| give back <= 35% | 3,373 | 47.5% | +3.68 | +1.94 | +2.69% | 3.05x |
+| give back <= 25% | 3,591 | 47.1% | +2.64 | +1.49 | −2.37% | 3.25x |
+
+The pattern is the textbook one and it is consistent across all three settings:
+**the hit rate rises and the expectancy falls.** Cutting winners earlier turns
+more trades into wins and makes every win smaller, and this strategy is carried
+by its payoff ratio (1.31–1.44), not by its hit rate. Turnover rises too,
+2.50 to 3.25x per day, because an earlier exit frees the symbol to re-enter — so
+the fixed cost is paid more often as well.
+
+The result is also **non-monotonic** in the threshold: 0.35 is better than both
+0.50 and 0.25. A real relationship would not zig-zag; that is noise.
+
+`max_giveback` is implemented, tested and **off by default**. It fixes the trade
+it was built for and costs money across the sample, which is the whole reason a
+single trade cannot decide an exit rule.
+
+---
+
+## 5j. Exits that follow the trend judgement, rather than a fixed barrier
+
+The objection to §5i's cap: a hard take-profit is arbitrary, and the exit should
+come from the same reading of the market that produced the entry. If the
+strategy now thinks the trend is up, it should not still be short. That is a
+consistency argument and it is correct as stated.
+
+Three implementations, in increasing strictness about what counts as a changed
+mind. All are off by default.
+
+| parameter | closes the position when |
+| --- | --- |
+| `exit_on_reversal` | the trend statistic crosses to the other side by this much |
+| `reversal_bars` | ...and has stayed there this many consecutive bars |
+| `exit_on_opposite_signal` | the **full entry rule** would open the other way now |
+
+The last one needs breaks to keep forming underneath an open position, which
+normally does not happen — the gate is lifted only when that exit is enabled, so
+the baseline state machine is untouched.
+
+**All three need `momentum_estimator=ewma`.** The `session` estimator cannot
+reverse within a day after a large early move (§5c), so it almost never fires
+these: with `exit_on_opposite_signal` it changes the MU trade not at all.
+
+### On the trade that prompted it
+
+MU 2026-06-29, the short from 09:40. The EWMA statistic turns positive at
+**10:50, with +278 bps still on the table**, while session drift stays negative
+all day.
+
+| | first short exits | realised | whole day |
+| --- | --- | --- | --- |
+| ratchet only (baseline) | 11:30 @ 1082.20 | +$697 | +$2 |
+| give back <= 50% (§5i) | 11:00 @ 1062.96 | +$2,163 | +$1,487 |
+| reversal exit @ 0.5 sigma | 11:05 @ 1072.01 | +$1,532 | +$3,694 |
+| **opposite-signal exit** | 11:10 @ 1075.87 | +$1,260 | **+$5,367** |
+
+### On the sample
+
+| variant | trades | gross/trade | t | **total return** | mean hold | turnover |
+| --- | --- | --- | --- | --- | --- | --- |
+| **baseline (session, ratchet only)** | 2,761 | **+4.33** | +1.86 | **+4.86%** | 49.5 | 2.50x |
+| ewma, no reversal exit | 2,817 | +3.49 | +1.51 | +1.68% | 48.5 | 2.55x |
+| opposite-signal exit (session) | 2,875 | +3.91 | +1.75 | +3.32% | 47.5 | 2.60x |
+| opposite-signal exit (ewma) | 3,900 | +1.46 | +0.89 | −8.61% | 34.6 | 3.53x |
+| reversal @ 1.0 sigma | 5,712 | +1.04 | +0.95 | −14.95% | 22.5 | 5.16x |
+| reversal @ 0.5, persist 4 bars | 4,946 | +0.87 | +0.68 | −14.24% | 27.4 | 4.48x |
+| reversal @ 0.5 sigma | 7,755 | +0.21 | +0.26 | −26.73% | 15.7 | 6.99x |
+| reversal @ 0.0 (plain sign flip) | 10,761 | +0.11 | +0.21 | **−35.65%** | 10.2 | 9.68x |
+
+**The ordering is the finding.** Across eight configurations, the more
+responsive the exit is to a change of trend, the better MU 2026-06-29 looks and
+the worse the sample performs — monotonically, from +4.86% down to −35.65%.
+Mean hold collapses from 49.5 bars to 10.2 and turnover quadruples, so the fixed
+3 bps toll is paid four times as often on trades whose gross has fallen to zero.
+
+### Why the consistency argument does not survive contact with the data
+
+The premise is that a trend, once identified, either persists or reverses, and
+that the statistic can tell which. R04/R05 measured that premise directly on
+this universe and it is false: intraday momentum has **rank IC −0.023 at
+t = −11.2**, reliably wrong-signed. A counter-move at 5-minute resolution is
+usually noise that reverts, not a trend change.
+
+So an exit built on "has the trend changed" is timing exits with a statistic
+that has no forward information — and paying a round trip each time it is wrong.
+The ratchet outperforms precisely because it makes no such claim: it is a pure
+risk rule, giving back a fixed volatility-scaled amount and holding through
+everything else.
+
+MU 2026-06-29 is a real case where reacting was right. It is one of 2,761, and
+the rule that would have caught it costs 13 to 40 points of return across the
+rest.
+
+**This does not close the question, it relocates it.** A trend-change exit needs
+a judgement of persistence that is better than the momentum z-score — which is
+what an LLM exit would have to supply. But the algorithmic result sets the bar:
+any such judgement has to beat a barrier that makes no prediction at all, while
+paying for the extra turnover it creates. That is the test to run before
+believing an LLM exit, not after.
+
+---
+
 ## 6. What this changes
 
 **The user's instinct was right, and for a better reason than the one given.**
@@ -442,11 +589,11 @@ zero; under measured spreads it is −3.09 bps/trade and not marginal at all. Th
 same correction applies to anything else in the repository with intraday
 turnover concentrated at the open.
 
-**The delay parameter is kept but left unset.** `no_entry_before` is
-implemented, tested and available. It is not enabled in the config, because on
-the evidence it removes the bucket with the highest gross while raising
-turnover — the right fix is to charge that bucket properly, not to refuse to
-trade it and then still trade it eight bars later.
+**Historical decision:** the original delay parameter was kept but left unset.
+R13 supersedes its semantics and the active config: the first ten minutes are
+now observation-only, pre-cutoff setups are consumed rather than delayed, and
+the stricter rule was re-tested. It still raises turnover and materially worsens
+the result, so the constraint is retained by instruction rather than as alpha.
 
 ## 7. Follow-up this creates
 

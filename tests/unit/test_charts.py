@@ -99,6 +99,69 @@ def test_the_strategy_gets_its_own_panel_alongside_macd():
     assert {"TREND_ZSCORE", "MACD"} <= {trace.name for trace in figure.data}
 
 
+def test_extra_panel_sits_immediately_below_macd():
+    """Named z-score columns overlay on a new row; the score panel stays below that."""
+    result = run(200)
+    result.signals.indicators["AAA"] = pd.DataFrame(
+        {
+            "score": range(200),
+            "z_ret_5m": range(200),
+            "z_er_15m": [v * 0.5 for v in range(200)],
+            "z_rvol_5m": [v * -0.2 for v in range(200)],
+        },
+        index=result.panel.index,
+    )
+
+    figure = price_chart(
+        result, "AAA",
+        extra_panel=["z_ret_5m", "z_er_15m", "z_rvol_5m"],
+        extra_panel_title="Factors (z)",
+    )
+    names = {trace.name for trace in figure.data}
+    assert {"z_ret_5m", "z_er_15m", "z_rvol_5m", "MACD", "SCORE"} <= names
+    axis_of = {trace.name: trace.yaxis for trace in figure.data if trace.name}
+    # Row 3 = MACD, row 4 = extra overlay, row 5 = score.
+    assert axis_of["MACD"] == "y3"
+    assert {axis_of[name] for name in ("z_ret_5m", "z_er_15m", "z_rvol_5m")} == {"y4"}
+    assert axis_of["SCORE"] == "y5"
+    titles = {
+        figure.layout[key].title.text
+        for key in figure.layout
+        if key.startswith("yaxis") and figure.layout[key].title.text
+    }
+    assert {"Price", "Volume", "MACD (12,26,9 ref)", "Factors (z)", "Score"} <= titles
+
+
+def test_return_panel_sits_below_the_score():
+    """Buy-and-hold and strategy return share the last row; HTML reports do not pass this."""
+    result = run(200)
+    result.signals.indicators["AAA"] = pd.DataFrame(
+        {"score": range(200), "z_ret_5m": range(200)},
+        index=result.panel.index,
+    )
+    figure = price_chart(
+        result, "AAA", extra_panel=["z_ret_5m"], return_panel=True,
+    )
+    axis_of = {trace.name: trace.yaxis for trace in figure.data if trace.name}
+    assert axis_of["MACD"] == "y3"
+    assert axis_of["z_ret_5m"] == "y4"
+    assert axis_of["SCORE"] == "y5"
+    assert axis_of["AAA B&H"] == "y6"
+    assert axis_of["Strategy (net)"] == "y6"
+    titles = {
+        figure.layout[key].title.text
+        for key in figure.layout
+        if key.startswith("yaxis") and figure.layout[key].title.text
+    }
+    assert "Return (%)" in titles
+
+
+def test_extra_panel_with_unknown_columns_is_refused():
+    result = run(80)
+    with pytest.raises(ValueError, match="extra_panel"):
+        price_chart(result, "AAA", extra_panel=["z_ret_5m"])
+
+
 def test_the_chart_can_be_limited_to_a_recent_window(tmp_path):
     """A run may load warm-up history without the chart being buried in it."""
     from qtrader.viz.report import write_report

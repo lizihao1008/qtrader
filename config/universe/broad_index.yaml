@@ -1,0 +1,8 @@
+# The two broad-index ETFs, both traded. SPY doubles as the benchmark: the
+# relative/residual features need a reference series, and on a two-symbol
+# universe there is no separate market proxy worth loading.
+name: broad_index
+benchmark: SPY
+symbols:
+  - SPY
+  - QQQ

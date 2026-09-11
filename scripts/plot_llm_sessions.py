@@ -94,6 +94,8 @@ def main() -> None:
                                   use_image=not args.no_image)
     client = (ScriptedClient([_AGREE_LONG], model="dry-run") if args.dry_run
               else OllamaClient(args.model))
+    if hasattr(client, "preflight"):
+        client.preflight()
 
     blocks, totals = [], {"base": 0.0, "llm": 0.0, "kept": 0, "vetoed": 0, "candidates": 0}
     _FIRST.append(sessions[0])

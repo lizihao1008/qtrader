@@ -39,6 +39,7 @@ import numpy as np
 import pandas as pd
 
 from ..data.panel import BarPanel
+from ..data.sessions import session_date
 from ..strategies.base import MarketContext, StrategySignals
 from .costs import CostModel
 from .metrics import compute_metrics
@@ -111,8 +112,15 @@ class BacktestEngine:
 
         weights = self._aligned_weights(signals, context)
 
-        # The delay between decision and execution.
+        # The delay between decision and execution. A pending target is a day
+        # order: it must not jump an overnight/session gap merely because the
+        # next available row belongs to the next trading day (notably after an
+        # early close, where a configured wall-clock flatten bar may not exist).
         delayed = weights.shift(cfg.execution_lag_bars).fillna(0.0)
+        sessions = pd.Series(session_date(panel.index).to_numpy(), index=panel.index)
+        decision_session = sessions.shift(cfg.execution_lag_bars)
+        crossed_session = decision_session.isna() | decision_session.ne(sessions)
+        delayed.loc[crossed_session] = 0.0
 
         weight_matrix = delayed.to_numpy(dtype=float)
         reference = panel.field(cfg.execution_price)[symbols].to_numpy(dtype=float)
@@ -136,8 +144,9 @@ class BacktestEngine:
             context.tradable[symbols]
             .shift(cfg.execution_lag_bars)
             .fillna(False)
-            .to_numpy(dtype=bool)
         )
+        eligible.loc[crossed_session] = False
+        eligible = eligible.to_numpy(dtype=bool)
 
         portfolio = Portfolio(cfg.initial_cash, self.cost_model)
         equity_at_last_close = cfg.initial_cash

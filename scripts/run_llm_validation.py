@@ -75,6 +75,8 @@ def main() -> None:
         if args.dry_run
         else OllamaClient(args.model, timeout=args.timeout, num_predict=args.num_predict)
     )
+    if hasattr(client, "preflight"):
+        client.preflight()
 
     print(f"{config.run_id} · {args.split} · model {client.model} · "
           f"min_confidence {validation.min_confidence} · on_abstain {validation.on_abstain}")

@@ -38,6 +38,17 @@ splits:
       calendar period was examined at 1-minute resolution during earlier work,
       though never at 5 minutes and never for these decisions.
 
+  # A calendar window, not an evaluation split: it straddles m5_validate and
+  # m5_test, so it is NOT clean out-of-sample and must never be cited as such.
+  # It exists to answer "what did the last year look like" against buy-and-hold.
+  last_year:
+    start: "2025-09-01"
+    end: "2026-08-29"
+    purpose: >
+      The trailing twelve months, for comparison against holding the index.
+      Overlaps two evaluation windows by construction; report it as a
+      description of a period, never as evidence.
+
   mine:
     start: "2026-02-02"
     end: "2026-06-01"

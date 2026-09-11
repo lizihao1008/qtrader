@@ -50,6 +50,37 @@ python scripts/plot_setups.py --config config/backtest/sr_momentum_5min.yaml --s
 
 Output: `results/sr_momentum_5min__m5_mine/setups.html`
 
+The canonical experiment config uses the R13 ten-minute observation gate plus
+R14's one-bar break acceptance and 2-ATR initial stop. Its current audited
+gallery (20 best + 20 worst, no Kronos overlay) is:
+
+```bash
+python scripts/plot_setups.py --config config/backtest/sr_momentum_5min.yaml \
+  --split m5_mine --n 20 --out setups_atr_acceptance.html
+```
+
+Output:
+`results/sr_momentum_5min__m5_mine/setups_atr_acceptance.html`.
+R14 records that this is a visual/risk-control experiment, not a performance
+improvement: the combined configuration lost −12.80% on `m5_mine`.
+
+To ask the local LLM to judge exactly those 20 best and 20 worst episodes and
+annotate each panel with KEEP/VETO/ABSTAIN:
+
+```bash
+python scripts/test_llm_gallery.py \
+  --config config/backtest/sr_momentum_5min.yaml --split m5_mine \
+  --model Qwen3.6:27b-mlx --n 20 --min-confidence 0.6 \
+  --timeout 120 --num-predict 220 \
+  --journal llm_gallery_decisions_qwen36_json.jsonl
+```
+
+Output:
+`results/sr_momentum_5min__m5_mine/setups_atr_acceptance_llm.html` plus a JSON
+summary and append-only verdict journal. R15 records the measured 5% loser veto
+rate and 0% winner false-veto rate; this extreme-case audit did not justify a
+full LLM backtest.
+
 This is the only strategy that publishes levels, so its panels carry the S/R
 line, the shaded break-tolerance band, and the previous-day / opening-range
 lines. The others degrade to candles, markers, peak and forecast.
@@ -181,7 +212,7 @@ Defined in `config/splits.yaml`. Use `m5_mine` for anything exploratory.
 | split | window | use |
 | --- | --- | --- |
 | `m5_mine` | 2024-01-02 → 2025-04-01 | hypothesis generation. **33 trials recorded** — Bonferroni puts the bar near \|t\| = 3.3 |
-| `m5_validate` | 2025-04-01 → 2026-01-01 | confirmation. Unspent — keep it that way until something looks clearly positive on `m5_mine` |
+| `m5_validate` | 2025-04-01 → 2026-01-01 | spent by the one R12 confirmation; do not tune against it |
 | `m5_test` | 2026-01-01 → 2026-08-27 | final holdout, partially contaminated |
 | `burned` | 2026-07-28 → 2026-08-26 | parameters were chosen on it; not a test set |
 

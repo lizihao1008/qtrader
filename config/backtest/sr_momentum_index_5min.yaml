@@ -1,0 +1,118 @@
+# S&P 500 and Nasdaq-100 ETFs, 5-minute bars.
+#
+# Same strategy and parameters as sr_momentum_5min.yaml. Three deliberate
+# differences, each recorded where it appears below: the universe, an index
+# cost of 1.50 bps per round trip rather than 3.00, and a book sized so it can
+# never bind (R17 showed a saturated book decides which trades happen).
+#
+# `round_step: 1.0` is left as-is. In bps a dollar is far finer here than on a
+# single stock, but what matters for a level is its spacing against the bar
+# range, and $1 is 2.38 ATR on SPY and 2.01 on QQQ against 1.2-3.1 for the
+# stocks -- the same band.
+#
+#
+# Implements the continuation sleeve of docs/research/deep-research-report.md.
+# Parameters are the report's stated starting values, NOT search results:
+# level_atr 0.15 is its stated initial value, the opening range is its 30-minute
+# example, and the risk geometry is shared unchanged with trend_ratchet.
+#
+# Known prior, recorded so the result is read against it rather than in a vacuum:
+# R07 measured both level families used here and found no effect (round-number
+# crossings continue at -0.0035 sigma vs -0.0030 for placebos; previous-day
+# extremes sit inside their own placebo range). R04/R05 measured intraday
+# momentum as reliably wrong-signed (rank IC -0.023, t = -11.2).
+
+run_id: sr_momentum_index
+
+universe: config/universe/broad_index.yaml
+
+data:
+  timeframe: 5Min
+  feed: iex
+  start: "2024-01-02"
+  end: "2026-08-27"
+  regular_hours_only: true
+
+strategy:
+  name: sr_momentum
+  params:
+    # Previous-day highs/lows are disabled by instruction: no prior-session
+    # K-line is allowed to set a level the strategy trades against. The ATR that
+    # sets the break-zone width is also session-local, so the overnight gap
+    # cannot widen today's tolerance (see features/levels.average_true_range).
+    #
+    # Still multi-session, because these are SCALES and not price levels:
+    #   relative_volume    5-session rolling median of dollar volume
+    #   seasonal_volatility per-minute profile from completed prior sessions
+    #   Kronos context     128 bars (~1.6 sessions) ending at the decision bar
+    # Restricting those to one session leaves nothing to normalise against for
+    # the first hour, which is where most entries are. R10 records the tradeoff.
+    use_previous_day: false
+    use_opening_range: true
+    use_round_numbers: true
+    round_step: 1.0
+    atr_window: 24
+    level_atr: 0.15          # report's stated starting value
+    require_retest: false    # R10 §5g: waiting for the retest measured worse
+    retest_bars: 6           # 30 minutes to come back and hold
+    # A break bar cannot confirm itself. Require the next completed bar to close
+    # farther in the breakout direction; an adverse/flat close resets the count.
+    acceptance_bars: 1
+    momentum_z_min: 0.25
+    rvol_min: 1.0
+    require_vwap_side: true
+    vol_window: 24
+    horizon_bars: 12
+    stop_sigmas: 1.0
+    # Turtle-style initial loss control: use the tighter of the historical
+    # horizon-sigma stop and 2 ATR. The wide sigma trail below is unchanged, so
+    # a position that first proves itself can still run.
+    initial_stop_atr: 2.0
+    trail_sigmas: 1.5
+    # R10 §5h: risk sizing is anti-correlated with the edge here — a tight stop
+    # earns a big position, and the edge grows with volatility.
+    sizing: equal
+    risk_per_trade: 0.001
+    max_weight: 0.45
+    max_positions: 2
+    allow_long: true
+    allow_short: true
+    # Bar timestamps are bar OPEN times; a decision is made at that bar's close
+    # and filled at the next open. Opening the decision gate on the 09:35 bar
+    # therefore makes 09:40 the earliest possible fill: exactly ten minutes
+    # after the open. Earlier breaks are consumed rather than queued, so price
+    # must invalidate and re-break that level (or break a different level)
+    # before the momentum, RVOL and VWAP filters may propose an entry.
+    no_entry_before: "09:35"
+    # Kronos cross-validation: DISABLED. Superseded by the local-LLM decision
+    # layer (ADR-0007); the measured cost of the Kronos veto is in R11 §2.
+    # To re-enable, set confirmation_path/confirmation_min again.
+    no_entry_after: "15:00"
+    flat_time: "15:50"
+
+liquidity:
+  min_price: 5.0
+  min_dollar_volume: 100000.0
+  lookback_bars: 12
+  max_stale_bars: 2
+
+costs:
+  # Index ETFs, not single stocks: 1.50 bps all-in per round trip
+  # (0.25 half-spread + 0.50 slippage on each of two sides), against the
+  # 3.00 bps charged on the 22-stock universe.
+  half_spread_bps: 0.25
+  slippage_bps: 0.5
+  commission_bps: 0.0
+  commission_per_share: 0.0
+  min_commission: 0.0
+
+execution:
+  initial_cash: 100000.0
+  gross_leverage: 0.95
+  execution_lag_bars: 1
+  execution_price: open
+  whole_shares: true
+  min_trade_notional: 250.0
+
+report:
+  symbols: [SPY, QQQ]

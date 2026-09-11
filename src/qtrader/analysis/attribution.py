@@ -72,16 +72,35 @@ def diagnose_shortfall(episodes) -> Shortfall:
     cost = features["cost_bps"]
 
     n = len(features)
-    mean_gross = float(gross.mean())
-    mean_cost = float(cost.mean())
+    # Weight each round trip by the capital it actually risked. A rule that
+    # scales a position out produces a half-size slice, and an unweighted mean
+    # counts that slice as a full observation — measured at +2.95 bps unweighted
+    # against +0.12 weighted on the same run, with total return *falling*. The
+    # equity curve feels the weighted number, so the verdict is drawn from it.
+    weights = features["notional"].to_numpy(dtype=float) if "notional" in features \
+        else np.ones(n)
+    usable = np.isfinite(weights) & (weights > 0)
+    if not usable.any():
+        weights, usable = np.ones(n), np.ones(n, dtype=bool)
+
+    values = gross.to_numpy(dtype=float)
+    mean_gross = float(np.average(values[usable], weights=weights[usable]))
+    mean_cost = float(np.average(cost.to_numpy(dtype=float)[usable], weights=weights[usable]))
+
+    # Weighted standard error, so the t-statistic is not inflated by counting
+    # small slices as full observations.
+    share = weights[usable] / weights[usable].sum()
+    variance = float(np.average((values[usable] - mean_gross) ** 2, weights=weights[usable]))
+    effective = 1.0 / np.sum(share ** 2)          # Kish effective sample size
     t_stat = (
-        mean_gross / (gross.std(ddof=1) / np.sqrt(n)) if n > 1 and gross.std(ddof=1) > 0
-        else float("nan")
+        mean_gross / np.sqrt(variance / effective)
+        if effective > 1 and variance > 0 else float("nan")
     )
 
     favourable = features["mfe_bps"].clip(lower=0.0)
     capture = float(gross.clip(lower=0).sum() / favourable.sum()) if favourable.sum() else 0.0
 
+    n = int(round(effective)) if np.isfinite(effective) else n
     winners = gross[gross > 0]
     losers = gross[gross <= 0]
     payoff = (
@@ -166,6 +185,23 @@ def performance_summary(result, episodes) -> pd.DataFrame:
     return table
 
 
+def _weighted_bps(trades: pd.DataFrame, column: str) -> float:
+    """Per-trade return weighted by the capital actually at risk in each trade.
+
+    The unweighted mean treats a half-size scale-out slice as one observation
+    equal to a full position, so any rule that splits a position inflates it —
+    measured at +2.95 bps unweighted against +0.12 weighted on the same run.
+    The equity curve feels the weighted number, so that is the one a verdict
+    may be drawn from.
+    """
+    notional = (trades["shares"].abs() * trades["entry_reference"]).to_numpy(dtype=float)
+    values = (trades[column] / (trades["shares"].abs() * trades["entry_reference"])).to_numpy()
+    usable = np.isfinite(notional) & np.isfinite(values) & (notional > 0)
+    if not usable.any():
+        return float("nan")
+    return float(np.average(values[usable], weights=notional[usable]) * 1e4)
+
+
 def _side_stats(trades: pd.DataFrame, features: pd.DataFrame) -> dict:
     if trades.empty:
         return {"trades": 0}
@@ -177,6 +213,8 @@ def _side_stats(trades: pd.DataFrame, features: pd.DataFrame) -> dict:
         "hit_rate": float((trades["net_pnl"] > 0).mean()),
         "expectancy_bps": float(features["net_return_bps"].mean()) if len(features) else np.nan,
         "gross_bps": float(features["gross_return_bps"].mean()) if len(features) else np.nan,
+        "gross_bps_weighted": _weighted_bps(trades, "gross_pnl"),
+        "net_bps_weighted": _weighted_bps(trades, "net_pnl"),
         "cost_bps": float(features["cost_bps"].mean()) if len(features) else np.nan,
         "profit_factor": float(wins.sum() / gross_loss) if gross_loss > 0 else np.inf,
         "net_pnl": float(trades["net_pnl"].sum()),

@@ -52,13 +52,16 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8">
 <div class="note">
 <p>{lede}</p>
 <p class="key">
-{levels_key}  <span><span class="swatch" style="border-top:2px dashed #ab47bc"></span>Kronos forecast close path</span>
-  <span>○ best the trade ever looked (peak)</span>
+{levels_key}{forecast_key}  <span>○ best the trade ever looked (peak)</span>
+  <span>▽ position cut back (hover for how much)</span>
 </p>
-<p>The solid vertical line is the entry; the dotted one is the exit. Everything
-right of the entry line in the Kronos path is prediction — the model was shown
-only the bars to its left. ✓/✗ in each title says whether the forecast agreed
-with the direction the strategy took.</p>
+<p>The solid vertical line is the entry; the dotted one is the exit. A hollow
+▽ marks a bar where the position was <b>reduced but not closed</b> — a scale-out
+leaves a smaller position running, so without it a partial exit is
+indistinguishable from an ordinary one. Each panel's second title line carries
+the gate readings <b>at the decision bar</b> — momentum z, relative volume,
+horizon sigma, acceptance count and the VWAP side — which is what the entry rule
+actually tested, one bar before the fill.{forecast_note}</p>
 </div>
 {winners}
 {losers}
@@ -81,6 +84,8 @@ def main() -> None:
     parser.add_argument("--columns", type=int, default=4)
     parser.add_argument("--context-bars", type=int, default=40)
     parser.add_argument("--out", default="setups.html", help="filename under the run directory")
+    parser.add_argument("--ranges", action="store_true",
+                        help="shade the market_state consolidation boxes")
     parser.add_argument("--set", action="append", default=[], metavar="NAME=VALUE")
     args = parser.parse_args()
 
@@ -98,6 +103,19 @@ def main() -> None:
     print(f"{config.run_id}: {len(episodes):,} episodes; "
           f"charting {len(winners)} winners and {len(losers)} losers")
 
+    ranges = None
+    if args.ranges:
+        from qtrader.experiments.consolidation_gate import range_state
+
+        # The detector's thresholds are stated in 5-minute bars. On a finer
+        # decision grid the boxes would be drawn from a series the gate never
+        # used, so refuse rather than draw a plausible-looking lie.
+        if config.data.timeframe != "5Min":
+            raise SystemExit(
+                f"--ranges needs a 5-minute panel; this run is {config.data.timeframe}"
+            )
+        ranges = range_state(run.context.panel, list(run.context.symbols))
+
     scores = load_scores(args.scores) if args.scores else None
     forecasts = {}
     if args.kronos_path:
@@ -105,12 +123,12 @@ def main() -> None:
 
     figures = {
         "winners": setup_gallery(
-            episodes, winners, forecasts=forecasts, scores=scores,
+            episodes, winners, forecasts=forecasts, scores=scores, ranges=ranges,
             columns=args.columns,
             title=f"{args.n} best trades — {config.run_id} · {args.split}",
         ),
         "losers": setup_gallery(
-            episodes, losers, forecasts=forecasts, scores=scores,
+            episodes, losers, forecasts=forecasts, scores=scores, ranges=ranges,
             columns=args.columns,
             title=f"{args.n} worst trades — {config.run_id} · {args.split}",
         ),
@@ -119,6 +137,10 @@ def main() -> None:
     # Only a level-based strategy publishes these; the page should not claim
     # to draw lines that are not there.
     draws_levels = "watched_level" in episodes.bars.columns
+    forecast_key = (
+        '  <span><span class="swatch" style="border-top:2px dashed #ab47bc"></span>'
+        "Kronos forecast close path</span>\n" if forecasts else ""
+    )
     levels_key = (
         '  <span><span class="swatch" style="border-top:2px solid #455a64"></span>'
         "S/R level the rule watched (shaded band = break tolerance)</span>\n"
@@ -126,15 +148,29 @@ def main() -> None:
         "previous-day / opening-range levels</span>\n"
         if draws_levels else ""
     )
+    ranges_key = (
+        '  <span><span class="swatch" style="border-top:2px dotted #f9a825;'
+        'background:rgba(249,168,37,.13);height:9px"></span>'
+        "consolidation box (震荡区间) the detector was tracking</span>\n"
+        if ranges else ""
+    )
 
     path = config.output_dir() / args.out
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         PAGE.format(
-            title=f"{config.strategy.name} — setups and Kronos forecasts",
-            levels_key=levels_key,
+            title=(f"{config.strategy.name} — setups"
+                   + (" and Kronos forecasts" if forecasts else "")),
+            levels_key=levels_key + ranges_key,
+            forecast_key=forecast_key,
+            forecast_note=(
+                " Everything right of the entry line in the Kronos path is"
+                " prediction — the model was shown only the bars to its left."
+                " \u2713/\u2717 in each title says whether the forecast agreed with"
+                " the direction the strategy took." if forecasts else ""
+            ),
             css=REPORT_CSS,
-            lede=_lede(episodes, winners, losers, scores),
+            lede=_lede(episodes, winners, losers, scores, _round_trip_cost(config)),
             winners=figures["winners"].to_html(full_html=False, include_plotlyjs="cdn"),
             losers=figures["losers"].to_html(full_html=False, include_plotlyjs=False),
         )
@@ -199,15 +235,45 @@ def _agreement(episodes, episode_ids, scores) -> tuple[int, int]:
     return agreed, total
 
 
-def _lede(episodes, winners, losers, scores) -> str:
+def _weighted_gross(episodes) -> float:
+    """Mean gross per round trip, weighted by the capital each one risked.
+
+    A scale-out splits a position into a half-size slice and a remainder, and an
+    unweighted mean counts the slice as a full observation. Same defect that
+    inflated `search.py` before it was weighted; the headline here would be
+    +1.99 bps unweighted against the number the equity curve actually feels.
+    """
+    features = episodes.features
+    if "notional" not in features or not len(features):
+        return float(features["gross_return_bps"].mean()) if len(features) else float("nan")
+    weights = features["notional"].to_numpy(dtype=float)
+    values = features["gross_return_bps"].to_numpy(dtype=float)
+    usable = np.isfinite(weights) & (weights > 0) & np.isfinite(values)
+    if not usable.any():
+        return float("nan")
+    return float(np.average(values[usable], weights=weights[usable]))
+
+
+def _round_trip_cost(config) -> float:
+    """What this run actually charges, per round trip.
+
+    Read from the config rather than assumed: the index configs charge 1.50 bps
+    against the stock universe's 3.00, and a page that states the wrong one is
+    simply wrong about its own headline number.
+    """
+    per_side = config.costs.half_spread_bps + config.costs.slippage_bps
+    return 2.0 * per_side
+
+
+def _lede(episodes, winners, losers, scores, cost_bps: float) -> str:
     best = episodes.features.loc[winners, "gross_return_bps"]
     worst = episodes.features.loc[losers, "gross_return_bps"]
     line = (
         f"The {len(winners)} best trades gained {best.mean():+.0f} bps gross on average; "
         f"the {len(losers)} worst lost {worst.mean():+.0f} bps. "
         f"Across all {len(episodes):,} round trips the mean was "
-        f"{episodes.features['gross_return_bps'].mean():+.2f} bps against a 3.00 bps "
-        "round-trip cost."
+        f"{_weighted_gross(episodes):+.2f} bps against a "
+        f"{cost_bps:.2f} bps round-trip cost."
     )
     if scores is None:
         return line

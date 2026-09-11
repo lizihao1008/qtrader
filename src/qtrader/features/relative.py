@@ -41,9 +41,23 @@ def bar_log_returns(close: pd.DataFrame, *, within_session: bool = True) -> pd.D
     return returns
 
 
-def trailing_return(returns: pd.DataFrame, lookback: int) -> pd.DataFrame:
-    """Cumulative log return over the last ``lookback`` bars."""
-    return returns.rolling(lookback, min_periods=lookback).sum()
+def trailing_return(
+    returns: pd.DataFrame, lookback: int, *, restart: pd.Series | None = None
+) -> pd.DataFrame:
+    """Cumulative log return over the last ``lookback`` bars.
+
+    With ``restart`` (a session label per bar) the window does not reach back
+    past the session open, and the first ``lookback - 1`` bars of a day are NaN.
+    Without it a 15-bar window at 09:35 is built mostly from yesterday's last
+    ten minutes. ``bar_log_returns`` already zeroes the overnight *gap*, which
+    hides this: the window still contains yesterday's intraday moves, it just
+    joins them to today without a visible discontinuity.
+    """
+    if restart is None:
+        return returns.rolling(lookback, min_periods=lookback).sum()
+    return returns.groupby(restart.to_numpy()).transform(
+        lambda s: s.rolling(lookback, min_periods=lookback).sum()
+    )
 
 
 def align_reference(returns: pd.DataFrame, reference_of: dict[str, str]) -> pd.DataFrame:

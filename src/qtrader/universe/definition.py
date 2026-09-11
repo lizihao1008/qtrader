@@ -17,7 +17,7 @@ before any multi-year backtest.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import yaml
@@ -74,6 +74,12 @@ class Universe:
     def all_symbols(self) -> tuple[str, ...]:
         """Everything a run must download."""
         return tuple(sorted({*self.symbols, *self.reference_symbols}))
+
+    def with_symbol(self, symbol: str) -> "Universe":
+        """A copy that also trades ``symbol``, leaving references unchanged."""
+        if symbol in self.symbols:
+            return self
+        return replace(self, symbols=(*self.symbols, symbol))
 
     def peers(self, symbol: str) -> tuple[str, ...]:
         """Other universe members sharing ``symbol``'s sector."""

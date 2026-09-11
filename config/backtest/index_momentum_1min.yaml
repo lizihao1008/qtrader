@@ -1,0 +1,100 @@
+# Time-series momentum score for the two broad-index ETFs, 1-minute grid.
+#
+# Every factor is computed from that symbol's own path, already in random-walk
+# (or bar-sigma) units, then averaged. There is no cross-sectional z-score:
+# on one name that object is undefined, and on two it removes the market-common
+# move, which is the thing an index strategy is trying to trade.
+#
+# Known prior, recorded so the result is read against it rather than in a
+# vacuum: R04/R05 measured *stock* intraday momentum as wrong-signed. That
+# finding does not transfer here — those tests were residual to the market.
+# Judge this score with its own bucket ladder, not by inheriting that sign.
+#
+# Parameters are starting values, not search results.
+
+run_id: index_momentum_1min
+
+universe: config/universe/broad_index.yaml
+
+data:
+  timeframe: 1Min
+  feed: iex
+  start: "2024-01-02"
+  end: "2026-08-27"
+  regular_hours_only: true
+
+strategy:
+  name: index_momentum
+  params:
+    ret_windows: [5, 15]
+    ewma_span: 12
+    er_window: 15
+    rvol_window: 5
+    vol_window: 30
+    atr_window: 30
+    macd_fast: 12
+    macd_slow: 26
+    macd_signal: 9
+    # Equal weights are a starting point. rvol and |er_15| are unsigned and
+    # do not appear here; they enter as confirmation gates below.
+    weights:
+      session_z: 1.0
+      ewma_z: 1.0
+      ret_5_z: 1.0
+      ret_15_z: 1.0
+      vwap_z: 1.0
+      macd_z: 1.0
+    min_factors: 4
+    min_rvol: 1.0
+    min_er: null
+
+    entry_long: 1.5
+    entry_short: -1.5
+    # Exit when the thesis is gone, not when the score merely cools. Combined
+    # with a 15-bar re-entry cooldown this stops 1-minute scratches: the score
+    # includes a 5-minute return and a MACD velocity, so 1.0/0.3 was a round
+    # trip every time those wiggled. There is no time stop — a 30-bar cap
+    # sliced a session trend into tickets (R25).
+    exit_long: 0.0
+    exit_short: 0.0
+    max_holding_bars: null
+    min_holding_bars: 10
+    reentry_cooldown_bars: 15
+    stop_atr: 2.0
+
+    max_positions: 2
+    max_weight: 0.5
+    allow_long: true
+    allow_short: true
+
+    # Bar timestamps are bar OPEN times; a decision at that bar's close fills
+    # at the next open. 09:40 on a 1-minute grid is a 09:41 fill.
+    no_entry_before: "09:40"
+    no_entry_after: "15:30"
+    flat_time: "15:50"
+
+liquidity:
+  min_price: 5.0
+  min_dollar_volume: 100000.0
+  lookback_bars: 12
+  max_stale_bars: 2
+
+costs:
+  # Index ETFs: 1.50 bps all-in per round trip (0.25 half-spread + 0.50
+  # slippage on each of two sides).
+  half_spread_bps: 0.25
+  slippage_bps: 0.5
+  commission_bps: 0.0
+  commission_per_share: 0.0
+  min_commission: 0.0
+
+execution:
+  initial_cash: 100000.0
+  gross_leverage: 0.95
+  execution_lag_bars: 1
+  execution_price: open
+  whole_shares: true
+  min_trade_notional: 250.0
+
+report:
+  symbols: [SPY, QQQ]

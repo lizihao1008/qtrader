@@ -84,8 +84,8 @@ timestamp the write is refused (`RawDataConflict`). Nothing under `data/` or
 4. Position sizing uses equity marked at the previous bar's close.
 5. Session boundaries and rebalance grids come from the clock, not from
    neighbouring rows.
-6. Forward returns exist only in `backtest/signal_metrics.py`, are labelled as
-   labels, and never reach a strategy.
+6. Forward returns exist only in `backtest/signal_metrics.py` and in
+   `qtrader.labels`, are labelled as labels, and never reach a strategy.
 
 Regression tests: `test_engine.py::test_future_bars_cannot_change_past_fills`,
 `test_universe.py::test_the_filter_never_looks_ahead`,
@@ -131,14 +131,77 @@ per-minute standard deviation runs ~4x the session mean at the open and ~0.75x
 by midday, so a flat estimate loosens every sigma-based threshold precisely at
 the open. The profile is fitted on completed prior sessions only.
 
-The same per-bar sigma also defines the risk unit
+The same per-bar sigma defines the default risk unit
 `sigma_H = sigma_bar * sqrt(horizon)`, so trend strength, crossing sharpness and
-stop distance are all measured in one currency.
+stop distance are measured in one currency. `sr_momentum` can cap only its
+initial stop at `initial_stop_atr * ATR`; its trend ratchet remains sigma-based.
+R14 finds that 2 ATR improves the loss tail but raises churn and worsens the
+portfolio result, so this is a risk-control mechanism rather than established
+alpha.
+
+## 7c. Online regime detector
+
+`qtrader.regime.KalmanCUSUMRegimeDetector` is a *state* at the last closed bar
+(FLAT / UP / DOWN), not a forecast and not the same object as §7b's drift
+z-score. It consumes canonical 1-minute bars (`close` only). Measurement is
+`y_t = log(close_t) - log(close_session_open)`. A new session re-initialises
+the filter so the overnight gap is not a 1-minute slope.
+
+Every gate is a **driftless-random-walk** quantity, the same null as §7b:
+
+* `slope_z = slope / slope_rw_std`, where `slope_rw_std` comes from a 3x3
+  Lyapunov recursion carried beside the Kalman `P` — the sampling scale of a
+  linear filter of returns under the null, exactly the principle behind
+  `features.trend.random_walk_slope_scale` and
+  `features.momentum.session_reset_norms`. The Kalman posterior `sqrt(P[1,1])`
+  is **not** used for this: the local-linear-trend model is misspecified for
+  minute log prices, and standardising by it produced a spread of 1.4 (JPM) to
+  2.0 (TSLA), so no threshold generalised. `slope_std` is still reported, as a
+  diagnostic.
+* `er_rw = ER_n * sqrt(n)`. Under the null `E[ER_n] = 1/sqrt(n)` exactly, so
+  `er_rw` has mean 1.0 and sd 0.74 for **any** window: 1.0 reads "as
+  directional as noise", 2.05 is the null's 90th percentile. Raw `ER`
+  thresholds are not window-invariant and must not be reintroduced.
+* `exit_margin >= 0`: UP leaves when `slope_z < -exit_margin`, DOWN when
+  `slope_z > +exit_margin`. Larger is stickier.
+
+After FLAT→UP/DOWN, Kaufman ER uses only bars of the current regime. If
+`slope_z` fades below `weaken_z` or `weaken_frac` of the post-entry peak, the
+window shrinks to `er_tighten_window`; a window no more directional than noise
+(`er_rw < er_hold_rw`) or one that has cleanly retraced
+(`signed_er_rw` against the regime by `er_flip_rw`) returns the state to FLAT.
+That path **never** jumps to the opposite regime — `reversal_h` / `reversal_z`
+is the only direct UP↔DOWN route — and the weaken flag is released when
+`slope_z` recovers.
+
+The CUSUM is a persistence knob, not an ARL-calibrated test: its input is a
+filtered series with lag-1 autocorrelation ~0.95, and once `slope_z` is
+correctly scaled the CUSUM is nearly inert (moving `cusum_h` from 1.5 to 4.0
+changed capture by 0.00).
+
+Presets `sensitive` / `balanced` / `conservative` are quoted by their
+**false-entry rate on simulated driftless random walks** — 7.8 / 3.0 / 0.8
+entries per session (`evaluate.null_entry_rate`), a property of the thresholds
+alone. They are still not fitted to any universe.
+
+**It describes, it does not forecast**, and that is measured
+(`evaluate.describe_entries`): at entry the previous 10 bars have moved
++1.8 sigma in the declared direction, while the following 5–30 bars move
+±0.04 sigma with `frac_right_way` 0.46–0.52. Downstream it may be a gate or a
+veto; it must never be used as an alpha score.
+
+Offline labels used to score detection delay may look ahead
+(`qtrader.labels`, `qtrader.regime.evaluate`) and never enter the filter.
+`evaluate_regime` raises on an empty event table rather than returning NaNs.
 
 ## 8. Execution and cost assumptions
 
 * The engine trades a symbol **only when its target weight changes**; it never
   re-sizes a held position as equity drifts.
+* Delayed targets are **day orders**. If `execution_lag_bars` would carry a
+  decision across a session boundary, the pending target is cancelled rather
+  than executed at the next session's open. This also covers early-close days
+  where a configured wall-clock flatten bar is absent.
 * It **cannot open or increase** exposure in a symbol that did not print in the
   execution bar (no fill without a trade). Closing such a position is allowed
   and counted in `metrics['stale_exits']`.
@@ -205,7 +268,8 @@ chosen on.
 
 ## 12. Deferred by design
 
-Dynamic/statistical peer groups, the regime layer, supervised labels, ML models,
-the risk module and execution/broker integration are **not implemented yet**.
-Their package boundaries are described in the outline and will be added in that
-order (M2 → M6).
+Dynamic/statistical peer groups, ML models, the risk module and
+execution/broker integration are **not implemented yet**. The first regime
+detector exists (`qtrader.regime`); it is not wired into a strategy. Supervised
+*research* labels exist (`qtrader.labels.trend_events`) and are evaluation-only.
+Package boundaries for the remaining layers are in the outline (M2 → M6).

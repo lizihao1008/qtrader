@@ -7,6 +7,8 @@ than a trade.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -217,3 +219,55 @@ def test_the_call_budget_stops_further_model_calls(tmp_path):
 
     report = validate(signals, context, client, config=ValidationConfig(max_calls=2))
     assert len(client.calls) == 2 and report.counts["judged"] == 2
+
+
+def test_the_judged_chart_is_kept_and_the_journal_points_at_it(tmp_path):
+    """The image is part of the model's input, so a run without it is unauditable."""
+    context, signals = scene()
+    journal = Journal(tmp_path / "decisions.jsonl")
+    images = tmp_path / "llm_inputs"
+
+    validate(signals, context, ScriptedClient([agreeing()]), journal=journal,
+             config=ValidationConfig(image_dir=str(images)))
+
+    (row,) = journal.rows()
+    kept = Path(row["image_path"])
+    assert kept.exists() and kept.suffix == ".png" and kept.stat().st_size > 0
+    assert row["symbol"] in kept.name, "the file must be findable from its row"
+
+
+def test_no_image_is_kept_when_the_directory_is_unset(tmp_path):
+    context, signals = scene()
+    journal = Journal(tmp_path / "decisions.jsonl")
+    validate(signals, context, ScriptedClient([agreeing()]), journal=journal)
+
+    (row,) = journal.rows()
+    assert row["image_path"] == ""
+
+
+# ---------------------------------------------------- a missing model fails fast
+def test_preflight_names_the_missing_model_and_what_is_served():
+    """A wrong tag must stop a run, not become 20 abstentions."""
+    from qtrader.decision.client import ModelUnavailable, OllamaClient
+
+    class Served:
+        def __init__(self, names):
+            self.models = [type("M", (), {"model": n})() for n in names]
+
+    client = OllamaClient("Qwen3.6")
+    client._client = type("C", (), {"list": lambda self: Served(["Qwen3.6:27b-mlx"])})()
+
+    with pytest.raises(ModelUnavailable, match="Qwen3.6:27b-mlx"):
+        client.preflight()
+
+
+def test_preflight_passes_when_the_model_is_served():
+    from qtrader.decision.client import OllamaClient
+
+    class Served:
+        def __init__(self, names):
+            self.models = [type("M", (), {"model": n})() for n in names]
+
+    client = OllamaClient("Qwen3.6:27b-mlx")
+    client._client = type("C", (), {"list": lambda self: Served(["Qwen3.6:27b-mlx"])})()
+    client.preflight()

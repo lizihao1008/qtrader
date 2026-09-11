@@ -3,6 +3,12 @@ data/**
 !data/.gitkeep
 results/**
 !results/.gitkeep
+reports/**
+!reports/.gitkeep
+
+# Build caches
+.vite/
+*.tsbuildinfo
 
 # Secrets
 .env

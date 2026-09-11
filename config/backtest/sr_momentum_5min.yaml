@@ -44,12 +44,19 @@ strategy:
     level_atr: 0.15          # report's stated starting value
     require_retest: false    # R10 §5g: waiting for the retest measured worse
     retest_bars: 6           # 30 minutes to come back and hold
+    # A break bar cannot confirm itself. Require the next completed bar to close
+    # farther in the breakout direction; an adverse/flat close resets the count.
+    acceptance_bars: 1
     momentum_z_min: 1.0
     rvol_min: 1.0
     require_vwap_side: true
     vol_window: 24
     horizon_bars: 12
     stop_sigmas: 1.0
+    # Turtle-style initial loss control: use the tighter of the historical
+    # horizon-sigma stop and 2 ATR. The wide sigma trail below is unchanged, so
+    # a position that first proves itself can still run.
+    initial_stop_atr: 2.0
     trail_sigmas: 1.5
     # R10 §5h: risk sizing is anti-correlated with the edge here — a tight stop
     # earns a big position, and the edge grows with volatility.
@@ -59,10 +66,13 @@ strategy:
     max_positions: 6
     allow_long: true
     allow_short: true
-    # no_entry_before is available and tested but deliberately unset: R10 found
-    # it removes the highest-gross bucket while RAISING turnover, because a
-    # blocked setup re-enters on the first admitted bar rather than being
-    # cancelled. The open needs to be charged properly, not avoided.
+    # Bar timestamps are bar OPEN times; a decision is made at that bar's close
+    # and filled at the next open. Opening the decision gate on the 09:35 bar
+    # therefore makes 09:40 the earliest possible fill: exactly ten minutes
+    # after the open. Earlier breaks are consumed rather than queued, so price
+    # must invalidate and re-break that level (or break a different level)
+    # before the momentum, RVOL and VWAP filters may propose an entry.
+    no_entry_before: "09:35"
     # Kronos cross-validation: DISABLED. Superseded by the local-LLM decision
     # layer (ADR-0007); the measured cost of the Kronos veto is in R11 §2.
     # To re-enable, set confirmation_path/confirmation_min again.

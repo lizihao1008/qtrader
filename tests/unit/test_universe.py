@@ -26,6 +26,14 @@ def test_reference_symbols_are_downloaded_but_not_traded():
     assert "SPY" not in universe.symbols
 
 
+def test_with_symbol_adds_a_tradable_name_without_touching_references():
+    base = build_universe()
+    universe = base.with_symbol("QQQ")
+    assert universe.symbols == ("AAA", "BBB", "QQQ")
+    assert universe.benchmark == "SPY"
+    assert base.with_symbol("AAA") is base
+
+
 def test_peers_share_a_sector():
     universe = build_universe(
         symbols=("AAA", "BBB", "CCC"),

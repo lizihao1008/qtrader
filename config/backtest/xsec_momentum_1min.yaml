@@ -1,0 +1,111 @@
+# Cross-sectional intraday momentum score, 1-minute decision grid.
+#
+# Eight factors, each cross-sectionally z-scored across the eligible universe at
+# every minute, then weighted into one score. An entry needs the score to be
+# extreme in absolute terms AND extreme relative to everything else available;
+# the two disagree when the whole universe moves together, which is exactly the
+# case the percentile gate exists to refuse.
+#
+# Known prior, recorded so the result is read against it rather than in a
+# vacuum: R04/R05 measured intraday momentum on this data as reliably
+# wrong-signed (rank IC -0.023, t = -11.2), and R24 §1 found the strongest
+# cross-sectional rankers to be volatility and size rather than any return.
+# Before believing any P&L from this config, read the score-bucket table from
+# `scripts/score_monotonicity.py`, and read the TRADEABLE column: R31 measured
+# 58% of the decile spread accruing between the decision close and the next
+# open, where no fill can reach it.
+#
+# Scope, so this config is not over-read: cross-sectional standardisation
+# removes whatever the universe is doing in common. A day on which every name
+# rises leaves this score unmoved, by construction. Nothing measured here can
+# confirm or refute market-level time-series momentum.
+
+run_id: xsec_momentum_1min
+
+universe: config/universe/us_liquid_22.yaml
+
+data:
+  timeframe: 1Min
+  feed: iex
+  start: "2024-01-02"
+  end: "2026-08-27"
+  regular_hours_only: true
+
+strategy:
+  name: xsec_momentum
+  params:
+    # Factor windows in bars; on a 1-minute grid these are minutes.
+    ret_windows: [1, 5, 15, 30]
+    relative_window: 15
+    rvol_window: 5
+    er_window: 15
+    vol_window: 30
+    atr_window: 30
+    # The specification asks for the raw factors to be z-scored. Left off so
+    # that is what happens; turn on to measure how much of the score is a
+    # volatility ranking rather than a return ranking (R24 §1).
+    volatility_normalise: false
+    # Equal weights are a starting point, not a search result.
+    # Equal weights are a starting point, not a search result. rvol_5m is NOT
+    # here: it is unsigned, so a positive weight would push every busy symbol
+    # towards "long" whichever way it moved. It enters as `min_rvol_z` below.
+    weights:
+      ret_1m: 1.0
+      ret_5m: 1.0
+      ret_15m: 1.0
+      ret_30m: 1.0
+      vwap_deviation: 1.0
+      relative_ret_15m: 1.0
+      er_15m: 1.0
+    # Unsigned confirmation, applied to both sides equally: the move must be
+    # carrying more volume than the cross-section's average.
+    min_rvol_z: 0.0
+    # A score built from half its inputs is not the score the weights describe.
+    min_factors: 5
+
+    entry_long: 1.5
+    entry_short: -1.5
+    exit_long: 0.5
+    exit_short: -0.5
+    rank_long: 0.95
+    rank_short: 0.05
+    max_holding_bars: 30
+    stop_atr: 2.0
+
+    max_positions: 5
+    max_weight: 0.2
+    allow_long: true
+    allow_short: true
+
+    # Bar timestamps are bar OPEN times; a decision at that bar's close fills at
+    # the next open. On a 1-MINUTE grid 09:35 therefore means a 09:36 fill --
+    # six minutes after the open, not ten. R13's ten-minute blackout needs
+    # 09:40 here, which makes 09:41 the earliest fill. Copying 09:35 from a
+    # 5-minute config silently changed what the rule meant.
+    no_entry_before: "09:40"
+    no_entry_after: "15:30"
+    flat_time: "15:50"
+
+liquidity:
+  min_price: 5.0
+  min_dollar_volume: 100000.0
+  lookback_bars: 60
+  max_stale_bars: 5
+
+costs:
+  half_spread_bps: 1.0
+  slippage_bps: 0.5
+  commission_bps: 0.0
+  commission_per_share: 0.0
+  min_commission: 0.0
+
+execution:
+  initial_cash: 100000.0
+  gross_leverage: 0.95
+  execution_lag_bars: 1
+  execution_price: open
+  whole_shares: true
+  min_trade_notional: 250.0
+
+report:
+  symbols: [AAPL, NVDA, TSLA]

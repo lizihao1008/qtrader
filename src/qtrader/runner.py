@@ -35,9 +35,17 @@ class Run:
     validation: object | None = None
 
 
-def build_context(config: RunConfig, store: BarStore | None = None) -> MarketContext:
-    """Load the universe's data and decide what was tradable at each bar."""
-    universe = config.universe()
+def build_context(
+    config: RunConfig,
+    store: BarStore | None = None,
+    universe=None,
+) -> MarketContext:
+    """Load the universe's data and decide what was tradable at each bar.
+
+    ``universe`` overrides the config's YAML so a lab can add one extra name
+    without rewriting the file. Production runs omit it.
+    """
+    universe = universe if universe is not None else config.universe()
     panel = load_panel(
         universe.all_symbols,
         timeframe=config.data.timeframe,
@@ -48,7 +56,21 @@ def build_context(config: RunConfig, store: BarStore | None = None) -> MarketCon
     )
     # Reference ETFs are data, never positions: the mask covers stocks only.
     tradable = config.liquidity.tradable(panel)[list(universe.symbols)]
-    return MarketContext(panel=panel, universe=universe, tradable=tradable)
+
+    fine_panel = None
+    if config.data.fine_timeframe:
+        fine_panel = load_panel(
+            universe.all_symbols,
+            timeframe=config.data.fine_timeframe,
+            feed=config.data.feed,
+            start=config.data.start_dt(),
+            end=config.data.end_dt(),
+            store=store or BarStore(config.data_root),
+        )
+
+    return MarketContext(
+        panel=panel, universe=universe, tradable=tradable, fine_panel=fine_panel
+    )
 
 
 def execute(

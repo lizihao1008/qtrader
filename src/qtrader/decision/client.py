@@ -20,8 +20,13 @@ from .schema import VERDICT_SCHEMA, Verdict
 
 #: `Qwen3.6` needs think=False: with reasoning on it spends the whole token
 #: budget in `thinking` and returns empty content. Measured ~8 s/call this way.
-DEFAULT_MODEL = "Qwen3.6"
-DEFAULT_TIMEOUT = 45.0
+DEFAULT_MODEL = "Qwen3.6:27b-mlx"
+
+#: Generous on purpose. A timeout is indistinguishable from a refusal to the
+#: caller, so one set too tight quietly turns a whole run into abstentions —
+#: measured at 45 s against a 27B model, 13 of 20 candidates timed out and the
+#: summary reported them as "no vetoes". Better to wait than to mislabel.
+DEFAULT_TIMEOUT = 300.0
 
 
 @dataclass(frozen=True)
@@ -38,6 +43,10 @@ class Reply:
     @property
     def ok(self) -> bool:
         return self.verdict is not None
+
+
+class ModelUnavailable(RuntimeError):
+    """The named model is not being served. A configuration error, not a refusal."""
 
 
 class OllamaClient:
@@ -64,6 +73,22 @@ class OllamaClient:
 
             self._client = Client(host=self._host, timeout=self.timeout)
         return self._client
+
+    def preflight(self) -> None:
+        """Fail loudly before a run if the model is not there.
+
+        Without this a wrong tag makes every call 404, each 404 becomes an
+        abstention, and a summary of abstentions is indistinguishable from a
+        model that judged everything and objected to nothing.
+        """
+        try:
+            served = {m.model for m in self._connect().list().models}
+        except Exception as exc:  # noqa: BLE001
+            raise ModelUnavailable(f"cannot reach ollama: {exc}") from exc
+        if self.model not in served:
+            raise ModelUnavailable(
+                f"model {self.model!r} is not served; available: {sorted(served)}"
+            )
 
     def ask(self, prompt: str, image: bytes = b"") -> Reply:
         """One call. Never raises — every failure becomes a Reply with an error."""
@@ -108,6 +133,22 @@ class ScriptedClient:
         self._latency = latency_s
         self.model = model
         self.calls: list[tuple[str, int]] = []
+
+    def preflight(self) -> None:
+        """Fail loudly before a run if the model is not there.
+
+        Without this a wrong tag makes every call 404, each 404 becomes an
+        abstention, and a summary of abstentions is indistinguishable from a
+        model that judged everything and objected to nothing.
+        """
+        try:
+            served = {m.model for m in self._connect().list().models}
+        except Exception as exc:  # noqa: BLE001
+            raise ModelUnavailable(f"cannot reach ollama: {exc}") from exc
+        if self.model not in served:
+            raise ModelUnavailable(
+                f"model {self.model!r} is not served; available: {sorted(served)}"
+            )
 
     def ask(self, prompt: str, image: bytes = b"") -> Reply:
         self.calls.append((prompt, len(image)))
